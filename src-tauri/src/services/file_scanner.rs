@@ -163,7 +163,7 @@ impl FileScanner {
         for exclude in &self.config.exclude_paths {
             // 精确匹配目录名
             if let Some(file_name) = path.file_name() {
-                if file_name == exclude {
+                if file_name.to_string_lossy() == **exclude {
                     return true;
                 }
             }

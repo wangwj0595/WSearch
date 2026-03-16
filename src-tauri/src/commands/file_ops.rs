@@ -34,7 +34,7 @@ pub fn open_file(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn reveal_in_explorer(path: String) -> Result<(), String> {
     let path = std::path::Path::new(&path);
-    let dir = if path.is_file() {
+    let _dir = if path.is_file() {
         path.parent().unwrap_or(path)
     } else {
         path
@@ -59,7 +59,7 @@ pub fn reveal_in_explorer(path: String) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         Command::new("xdg-open")
-            .arg(dir)
+            .arg(_dir)
             .spawn()
             .map_err(|e| e.to_string())?;
     }

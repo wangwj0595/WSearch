@@ -20,6 +20,7 @@ pub struct SearchConfig {
     pub search_content: bool,
     pub case_sensitive: bool,
     pub max_results: usize,
+    pub sidebar_width: u32,
 }
 
 impl Default for SearchConfig {
@@ -37,6 +38,7 @@ impl Default for SearchConfig {
             search_content: false,
             case_sensitive: false,
             max_results: 1000,
+            sidebar_width: 280,
         }
     }
 }

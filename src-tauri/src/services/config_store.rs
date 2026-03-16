@@ -1,4 +1,5 @@
 use crate::models::{AppConfig, SearchConfig};
+use dirs;
 use std::fs;
 use std::path::PathBuf;
 

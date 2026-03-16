@@ -16,6 +16,7 @@ export interface SearchConfig {
   search_content: boolean;
   case_sensitive: boolean;
   max_results: number;
+  sidebar_width: number;
 }
 
 // 搜索历史
@@ -33,4 +34,5 @@ export const defaultSearchConfig: SearchConfig = {
   search_content: false,
   case_sensitive: false,
   max_results: 1000,
+  sidebar_width: 280,
 };

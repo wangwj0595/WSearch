@@ -14,12 +14,54 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [config, setConfig] = useState<SearchConfig>(defaultSearchConfig);
   const [history, setHistory] = useState<SearchHistory[]>([]);
+  const [isResizing, setIsResizing] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(config.sidebar_width);
 
   // 加载配置和历史
   useEffect(() => {
     loadConfig();
     loadHistory();
   }, []);
+
+  // 同步配置中的侧边栏宽度
+  useEffect(() => {
+    setSidebarWidth(config.sidebar_width);
+  }, [config.sidebar_width]);
+
+  // 处理调整大小
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const newWidth = e.clientX;
+      // 限制最小和最大宽度
+      const minWidth = 200;
+      const maxWidth = 600;
+      const clampedWidth = Math.max(minWidth, Math.min(maxWidth, newWidth));
+      setSidebarWidth(clampedWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      // 保存新的宽度到配置
+      const newConfig = { ...config, sidebar_width: sidebarWidth };
+      setConfig(newConfig);
+      invoke("save_search_config", { config: newConfig });
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isResizing, sidebarWidth, config]);
 
   const loadConfig = async () => {
     try {
@@ -200,7 +242,7 @@ function App() {
 
   return (
     <div className="app-container">
-      <div className="sidebar">
+      <div className="sidebar" style={{ width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` }}>
         <Card size="small" title="搜索目录" extra={<Button type="link" size="small" onClick={addSearchPath}>+ 添加</Button>}>
           <List
             size="small"
@@ -270,6 +312,11 @@ function App() {
         </Card>
       </div>
 
+      <div 
+        className={`resizer ${isResizing ? 'active' : ''}`}
+        onMouseDown={handleMouseDown}
+      />
+
       <div className="main-content">
         <div className="search-bar">
           <Search
@@ -293,6 +340,7 @@ function App() {
             size="small"
             pagination={{ pageSize: 20 }}
             loading={loading}
+            scroll={{ y: 'calc(100vh - 260px)' }}
           />
         </div>
       </div>

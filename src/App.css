@@ -32,8 +32,6 @@ html, body, #root {
 }
 
 .sidebar {
-  width: 280px;
-  min-width: 280px;
   background: #fff;
   border-right: 1px solid #e8e8e8;
   padding: 12px;
@@ -64,16 +62,66 @@ html, body, #root {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .results-header {
   margin-bottom: 12px;
   color: #666;
+  flex-shrink: 0;
+}
+
+.results-container .ant-table-wrapper {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.results-container .ant-spin-nested-loading,
+.results-container .ant-spin-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .results-container .ant-table {
   flex: 1;
   overflow: auto;
+}
+
+/* 可调整大小的分割线 */
+.resizer {
+  width: 4px;
+  background: #e8e8e8;
+  cursor: col-resize;
+  transition: background 0.2s;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.resizer:hover,
+.resizer.active {
+  background: #1890ff;
+}
+
+.resizer::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 20px;
+  background: transparent;
+  border-radius: 1px;
+}
+
+.resizer:hover::after,
+.resizer.active::after {
+  background: #fff;
 }
 
 /* 暗色模式 */
