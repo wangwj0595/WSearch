@@ -21,6 +21,15 @@ pnpx skills add ant-design/antd-skill
 pnpm tauri dev
 ```
 
+## 注意
+
+当前环境没有安装 Rust/Cargo，无法直接运行 `pnpm tauri dev`。您需要：
+
+1. 安装 Rust: [](https://rustup.rs/)<https://rustup.rs/>
+2. 安装完成后运行 `pnpm tauri dev` 启动应用
+
+
+
 ## 推荐 IDE 配置
 
 - [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
