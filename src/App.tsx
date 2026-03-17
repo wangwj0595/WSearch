@@ -1,32 +1,100 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { message, Table, Button, Input, Space, Checkbox, List, Card, Typography, Tooltip } from "antd";
-import type { SearchResult, SearchConfig, SearchHistory } from "./types";
+import { ConfigProvider, message, Table, Button, Input, InputNumber, Space, Checkbox, List, Card, Typography, Tooltip, Progress, theme } from "antd";
+import type { SearchResult, SearchConfig, SearchHistory, SearchProgress, SearchCompletedEvent } from "./types";
+import type { RowSelectMethod } from "antd/es/table/interface";
 import { defaultSearchConfig } from "./types";
+import { useWindowSize } from "./hooks/useWindowSize";
 import "./App.css";
 
-const { Search } = Input;
 const { Text } = Typography;
 
-function App() {
+function AppContent() {
+  // 启用窗口大小记忆
+  useWindowSize();
+
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [config, setConfig] = useState<SearchConfig>(defaultSearchConfig);
   const [history, setHistory] = useState<SearchHistory[]>([]);
   const [isResizing, setIsResizing] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(config.sidebar_width);
+  const [pageSize, setPageSize] = useState(25);
+  const [currentPage, setCurrentPage] = useState(1);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [tableHeight, setTableHeight] = useState(400);
+  const [totalResults, setTotalResults] = useState(0);
+  const [searchProgress, setSearchProgress] = useState<SearchProgress | null>(null);
+  const [lastSearchTime, setLastSearchTime] = useState<number | null>(null);
+  const [searchKeyword, setSearchKeyword] = useState<string>("");
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [lastSelectedRow, setLastSelectedRow] = useState<number | null>(null);
 
   // 加载配置和历史
   useEffect(() => {
     loadConfig();
     loadHistory();
+
+    // 监听搜索结果批次事件（流式显示）
+    const unlistenBatch = listen<SearchResult[]>("search_result_batch", (event) => {
+      setResults(prev => [...prev, ...event.payload]);
+    });
+
+    // 监听搜索完成事件
+    const unlistenComplete = listen<SearchCompletedEvent>("search_completed", (event) => {
+      setTotalResults(event.payload.result_count);
+      // 保存搜索时间
+      setLastSearchTime(event.payload.elapsed_time);
+      setLoading(false);
+      loadHistory();
+    });
+
+    // 监听搜索开始事件
+    const unlistenStart = listen("search_started", () => {
+      setResults([]);
+      setTotalResults(0);
+      setSearchProgress(null);
+      setLastSearchTime(null);
+      setSelectedRowKeys([]);
+      setLastSelectedRow(null);
+      setCurrentPage(1);
+    });
+
+    // 监听搜索进度事件
+    const unlistenProgress = listen<SearchProgress>("search_progress", (event) => {
+      setSearchProgress(event.payload);
+    });
+
+    return () => {
+      unlistenBatch.then(fn => fn());
+      unlistenComplete.then(fn => fn());
+      unlistenStart.then(fn => fn());
+      unlistenProgress.then(fn => fn());
+    };
   }, []);
 
   // 同步配置中的侧边栏宽度
   useEffect(() => {
     setSidebarWidth(config.sidebar_width);
   }, [config.sidebar_width]);
+
+  // 计算表格高度
+  useEffect(() => {
+    const updateHeight = () => {
+      if (containerRef.current) {
+        const containerHeight = containerRef.current.clientHeight;
+        // 搜索栏高度 72px + 结果头部 40px + padding 32px = 144px
+        const height = containerHeight - 144;
+        setTableHeight(Math.max(200, height));
+      }
+    };
+
+    updateHeight();
+    window.addEventListener('resize', updateHeight);
+    return () => window.removeEventListener('resize', updateHeight);
+  }, [sidebarWidth]);
 
   // 处理调整大小
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -129,7 +197,7 @@ function App() {
     invoke("save_search_config", { config: newConfig });
   };
 
-  // 执行搜索
+  // 执行搜索（流式版本）
   const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) {
       message.warning("请输入搜索关键词");
@@ -141,8 +209,12 @@ function App() {
     }
 
     setLoading(true);
+    setResults([]);
+    setTotalResults(0);
+
     try {
-      const searchResults = await invoke<SearchResult[]>("search_files", {
+      // 流式搜索：不等待返回结果，结果通过事件分批推送
+      await invoke("search_files", {
         query: searchQuery,
         searchPaths: config.search_paths,
         excludePaths: config.exclude_paths,
@@ -151,11 +223,9 @@ function App() {
         caseSensitive: config.case_sensitive,
         maxResults: config.max_results,
       });
-      setResults(searchResults);
-      loadHistory(); // 刷新历史
+      // 搜索历史会在 search_completed 事件中刷新
     } catch (e) {
       message.error(`搜索失败: ${e}`);
-    } finally {
       setLoading(false);
     }
   }, [config]);
@@ -189,12 +259,30 @@ function App() {
     }
   };
 
+  // 取消搜索
+  const handleCancelSearch = async () => {
+    try {
+      await invoke("cancel_search");
+      setLoading(false);
+      message.info("搜索已取消");
+    } catch (e) {
+      message.error(`取消失败: ${e}`);
+    }
+  };
+
+  // 分页变化处理
+  const handlePaginationChange = (page: number, size: number) => {
+    setCurrentPage(page);
+    setPageSize(size);
+  };
+
   // 表格列定义
   const columns = [
     {
       title: "名称",
       dataIndex: "name",
       key: "name",
+      sorter: (a: SearchResult, b: SearchResult) => a.name.localeCompare(b.name),
       render: (name: string, record: SearchResult) => (
         <Space>
           <span>{record.is_directory ? "📁" : "📄"}</span>
@@ -207,6 +295,7 @@ function App() {
       dataIndex: "path",
       key: "path",
       ellipsis: true,
+      sorter: (a: SearchResult, b: SearchResult) => a.path.localeCompare(b.path),
       render: (path: string) => (
         <Tooltip title={path}>
           <Text type="secondary" style={{ fontSize: 12 }}>{path}</Text>
@@ -218,6 +307,7 @@ function App() {
       dataIndex: "size",
       key: "size",
       width: 100,
+      sorter: (a: SearchResult, b: SearchResult) => a.size - b.size,
       render: (size: number) => size > 0 ? `${(size / 1024).toFixed(1)} KB` : "-",
     },
     {
@@ -225,6 +315,7 @@ function App() {
       dataIndex: "modified_time",
       key: "modified_time",
       width: 180,
+      sorter: (a: SearchResult, b: SearchResult) => a.modified_time.localeCompare(b.modified_time),
       render: (time: string) => <Text type="secondary" style={{ fontSize: 12 }}>{time}</Text>,
     },
     {
@@ -293,6 +384,23 @@ function App() {
             >
               区分大小写
             </Checkbox>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Text style={{ fontSize: 12 }}>最大结果数:</Text>
+              <InputNumber
+                size="small"
+                min={1}
+                max={10000}
+                value={config.max_results}
+                onChange={(value) => {
+                  if (value) {
+                    const newConfig = { ...config, max_results: value };
+                    setConfig(newConfig);
+                    invoke("save_search_config", { config: newConfig });
+                  }
+                }}
+                style={{ width: 100 }}
+              />
+            </div>
           </Space>
         </Card>
 
@@ -303,7 +411,14 @@ function App() {
             size="small"
             dataSource={history.slice(0, 10)}
             renderItem={(item) => (
-              <List.Item style={{ cursor: "pointer", padding: "4px 8px" }} onClick={() => handleSearch(item.query)}>
+              <List.Item style={{ cursor: "pointer", padding: "4px 8px" }} onClick={async () => {
+                // 如果正在搜索，先取消当前搜索
+                if (loading) {
+                  await handleCancelSearch();
+                }
+                setSearchKeyword(item.query);
+                handleSearch(item.query);
+              }}>
                 <Text ellipsis>{item.query}</Text>
                 <Text type="secondary" style={{ fontSize: 10 }}>({item.result_count})</Text>
               </List.Item>
@@ -312,39 +427,153 @@ function App() {
         </Card>
       </div>
 
-      <div 
+      <div
         className={`resizer ${isResizing ? 'active' : ''}`}
         onMouseDown={handleMouseDown}
       />
 
       <div className="main-content">
         <div className="search-bar">
-          <Search
-            placeholder="输入文件名或内容搜索..."
-            enterButton="搜索"
-            size="large"
-            loading={loading}
-            onSearch={handleSearch}
-            style={{ flex: 1 }}
-          />
+          <Space.Compact style={{ flex: 1 }}>
+            <Input
+              placeholder="输入文件名或内容搜索..."
+              size="large"
+              value={searchKeyword}
+              onChange={(e) => setSearchKeyword(e.target.value)}
+              onPressEnter={() => {
+                if (!loading && searchKeyword.trim()) {
+                  handleSearch(searchKeyword);
+                }
+              }}
+              style={{ flex: 1 }}
+              disabled={loading}
+            />
+            <Button
+              size="large"
+              type={loading ? "default" : "primary"}
+              onClick={loading ? handleCancelSearch : () => {
+                if (searchKeyword.trim()) {
+                  handleSearch(searchKeyword);
+                }
+              }}
+            >
+              {loading ? "取消" : "搜索"}
+            </Button>
+          </Space.Compact>
         </div>
 
-        <div className="results-container">
-          <div className="results-header">
-            <Text>找到 {results.length} 个结果</Text>
-          </div>
+        <div className="results-container" ref={containerRef}>
+          {loading && searchProgress && searchProgress.scanned_count > 0 && (
+            <div className="results-header" style={{ padding: '8px 16px', borderBottom: '1px solid #f0f0f0' }}>
+              <Progress
+                percent={Math.min(99, Math.floor((searchProgress.scanned_count / Math.max(1, searchProgress.scanned_count + searchProgress.estimated_remaining * 100)) * 100))}
+                size="small"
+                showInfo={false}
+                status="active"
+                strokeColor="#1890ff"
+              />
+            </div>
+          )}
           <Table
             columns={columns}
             dataSource={results}
             rowKey="path"
             size="small"
-            pagination={{ pageSize: 20 }}
+            rowSelection={{
+              selectedRowKeys,
+              onChange: (newSelectedRowKeys: React.Key[], selectedRows: SearchResult[], info: { type: RowSelectMethod }) => {
+                // 判断是否按住了Shift键
+                if (info.type === 'multiple' && lastSelectedRow !== null) {
+                  // Shift键多选：计算选中范围
+                  const currentIndex = selectedRows.findIndex(row => row.path === newSelectedRowKeys[newSelectedRowKeys.length - 1]);
+                  if (currentIndex !== -1 && currentIndex !== lastSelectedRow) {
+                    // 获取当前页的数据（考虑分页）
+                    const start = Math.min(lastSelectedRow, currentIndex);
+                    const end = Math.max(lastSelectedRow, currentIndex);
+
+                    // 获取当前页的所有行的key
+                    const currentPageData = results;
+                    const rangeKeys = currentPageData.slice(start, end + 1).map(item => item.path);
+
+                    // 合并选中的keys（去重）
+                    const mergedKeys = [...new Set([...newSelectedRowKeys, ...rangeKeys])];
+                    setSelectedRowKeys(mergedKeys);
+                    setLastSelectedRow(currentIndex);
+                    return;
+                  }
+                }
+
+                // 普通选择：更新选中状态和记录最后选中的行索引
+                setSelectedRowKeys(newSelectedRowKeys);
+                const currentIndex = selectedRows.length > 0
+                  ? results.findIndex(row => row.path === newSelectedRowKeys[newSelectedRowKeys.length - 1])
+                  : null;
+                setLastSelectedRow(currentIndex !== -1 ? currentIndex : null);
+              },
+            }}
+            pagination={{
+              current: currentPage,
+              pageSize: pageSize,
+              showSizeChanger: true,
+              pageSizeOptions: ['10', '20', '25', '50', '100'],
+              showTotal: (total: number) => `共 ${total} 条`,
+              onChange: handlePaginationChange
+            }}
             loading={loading}
-            scroll={{ y: 'calc(100vh - 260px)' }}
+            scroll={{ y: tableHeight }}
+            title={() => (
+              <Space>
+                <Text>找到 {totalResults > 0 ? totalResults : results.length} 个结果</Text>
+                {loading && searchProgress && (
+                  <Text type="secondary">
+                    已花费 {searchProgress.elapsed_time} 秒
+                    {searchProgress.estimated_remaining > 0 && `，预计还有 ${searchProgress.estimated_remaining} 秒`}
+                  </Text>
+                )}
+                {!loading && lastSearchTime && (
+                  <Text type="secondary">
+                    共花费 {lastSearchTime} 秒
+                  </Text>
+                )}
+                {selectedRowKeys.length > 0 && (
+                  <Button
+                    size="small"
+                    type="primary"
+                    onClick={() => {
+                      const selectedItems = results.filter(item => selectedRowKeys.includes(item.path));
+                      selectedItems.forEach(item => handleOpenFile(item.path));
+                    }}
+                  >
+                    打开选中 ({selectedRowKeys.length})
+                  </Button>
+                )}
+              </Space>
+            )}
           />
+          {loading && searchProgress && searchProgress.current_path && (
+            <div className="results-footer" style={{ padding: '8px 16px', borderTop: '1px solid #f0f0f0', background: '#fafafa', position: 'sticky', bottom: 0 }}>
+              <Text type="secondary">🔍 正在搜索: {searchProgress.current_path}</Text>
+            </div>
+          )}
         </div>
       </div>
     </div>
+  );
+}
+
+function App() {
+  return (
+    <ConfigProvider
+      theme={{
+        algorithm: theme.defaultAlgorithm,
+        token: {
+          // 可在此配置全局主题 token
+          // colorPrimary: '#1890ff',
+        },
+      }}
+    >
+      <AppContent />
+    </ConfigProvider>
   );
 }
 

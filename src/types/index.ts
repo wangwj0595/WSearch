@@ -26,6 +26,29 @@ export interface SearchHistory {
   result_count: number;
 }
 
+// 搜索进度
+export interface SearchProgress {
+  scanned_count: number;
+  found_count: number;
+  current_path: string;
+  elapsed_time: number;
+  estimated_remaining: number;
+}
+
+// 搜索完成事件数据
+export interface SearchCompletedEvent {
+  result_count: number;
+  elapsed_time: number;
+}
+
+// 窗口配置
+export interface WindowConfig {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+}
+
 // 默认配置
 export const defaultSearchConfig: SearchConfig = {
   search_paths: [],
@@ -33,6 +56,14 @@ export const defaultSearchConfig: SearchConfig = {
   file_types: [],
   search_content: false,
   case_sensitive: false,
-  max_results: 1000,
+  max_results: 3000,
   sidebar_width: 280,
+};
+
+// 默认窗口配置
+export const defaultWindowConfig: WindowConfig = {
+  width: 800,
+  height: 600,
+  x: 0,
+  y: 0,
 };

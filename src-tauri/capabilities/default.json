@@ -7,6 +7,11 @@
     "core:default",
     "opener:default",
     "dialog:default",
-    "shell:default"
+    "shell:default",
+    "core:window:allow-outer-size",
+    "core:window:allow-outer-position",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-center"
   ]
 }

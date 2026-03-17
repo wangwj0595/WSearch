@@ -1,4 +1,4 @@
-use crate::models::{AppConfig, SearchConfig};
+use crate::models::{AppConfig, SearchConfig, WindowConfig};
 use dirs;
 use std::fs;
 use std::path::PathBuf;
@@ -80,6 +80,18 @@ impl ConfigStore {
     /// 获取搜索历史
     pub fn get_search_history(&self) -> Vec<crate::models::SearchHistory> {
         self.load_config().search_history
+    }
+
+    /// 保存窗口配置
+    pub fn save_window_config(&self, window_config: WindowConfig) -> Result<(), String> {
+        let mut config = self.load_config();
+        config.window_config = window_config;
+        self.save_config(&config)
+    }
+
+    /// 获取窗口配置
+    pub fn get_window_config(&self) -> WindowConfig {
+        self.load_config().window_config
     }
 }
 

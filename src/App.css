@@ -89,7 +89,7 @@ html, body, #root {
 
 .results-container .ant-table {
   flex: 1;
-  overflow: auto;
+  overflow: hidden;
 }
 
 /* 可调整大小的分割线 */

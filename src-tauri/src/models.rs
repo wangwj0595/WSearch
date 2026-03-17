@@ -71,11 +71,21 @@ pub struct SearchHistory {
     pub result_count: usize,
 }
 
+/// 窗口配置
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WindowConfig {
+    pub width: u32,
+    pub height: u32,
+    pub x: i32,
+    pub y: i32,
+}
+
 /// 应用配置（包含搜索配置和历史）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     pub search_config: SearchConfig,
     pub search_history: Vec<SearchHistory>,
+    pub window_config: WindowConfig,
 }
 
 /// 搜索预设
