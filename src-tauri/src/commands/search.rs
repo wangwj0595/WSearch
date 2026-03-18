@@ -1,29 +1,31 @@
 use crate::models::{SearchConfig, SearchResult};
-use crate::services::{ConfigStore, FileScanner};
-use futures_util::StreamExt;
+use crate::services::config_store::ConfigStore;
+use crate::services::file_scanner::FileScanner;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::thread;
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 
 /// 搜索结果缓冲状态
 pub struct SearchState {
-    pub results: Mutex<Vec<SearchResult>>,
-    pub is_searching: Mutex<bool>,
+    pub results: Arc<Mutex<Vec<SearchResult>>>,
+    pub is_searching: Arc<Mutex<bool>>,
     pub is_cancelled: Arc<AtomicBool>,
 }
 
 impl Default for SearchState {
     fn default() -> Self {
         Self {
-            results: Mutex::new(Vec::new()),
-            is_searching: Mutex::new(false),
+            results: Arc::new(Mutex::new(Vec::new())),
+            is_searching: Arc::new(Mutex::new(false)),
             is_cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
-/// 搜索文件（异步流式并行版本）
+/// 搜索文件（专用线程 + Channel 实时版本）
 #[tauri::command]
 pub async fn search_files(
     query: String,
@@ -68,38 +70,57 @@ pub async fn search_files(
         sidebar_width: 280,
     };
 
-    let mut scanner = FileScanner::new(config);
-    let scanner_for_time = scanner.clone();
+    let scanner = FileScanner::new(config);
+    let start_time = Instant::now();
 
-    // 克隆取消标志的 Arc 引用
-    let is_cancelled = search_state.is_cancelled.clone();
+    // 使用专用线程 + Channel 搜索
+    let (result_rx, progress_rx, _is_cancelled) = scanner.search_with_channel(query.clone());
 
-    // 使用异步流式并行搜索
-    let mut stream = scanner.search_streaming(query.clone(), is_cancelled).await;
+    // 使用 Arc 共享状态
+    let results_arc = search_state.results.clone();
+    let is_searching_arc = search_state.is_searching.clone();
 
-    // 收集所有结果
-    let mut all_results = Vec::new();
+    // 在独立线程中监听结果并发送到前端
+    let app_handle_for_results = app_handle.clone();
 
-    // 遍历流，处理每个批次
-    while let Some(batch_results) = stream.next().await {
-        if !batch_results.is_empty() {
+    let result_thread = thread::spawn(move || {
+        // 收集所有结果
+        let mut all_results = Vec::new();
+
+        // 监听结果 channel，找到就立即发送到前端
+        while let Ok(item) = result_rx.recv() {
+            let result = item.result;
             // 更新状态
             {
-                let mut results = search_state.results.lock().unwrap();
-                results.extend(batch_results.clone());
+                let mut results = results_arc.lock().unwrap();
+                results.push(result.clone());
             }
-            all_results.extend(batch_results.clone());
-            // 发送批次结果到前端
-            let _ = app_handle.emit("search_result_batch", batch_results);
+            all_results.push(result.clone());
+
+            // 立即发送单个结果到前端（真实时）
+            let _ = app_handle_for_results.emit("search_result_batch", vec![result]);
         }
-    }
+
+        all_results
+    });
+
+    // 监听进度 channel，定期发送进度到前端（需要 clone app_handle）
+    let app_handle_for_progress = app_handle.clone();
+    thread::spawn(move || {
+        while let Ok(progress) = progress_rx.recv() {
+            let _ = app_handle_for_progress.emit("search_progress", progress);
+        }
+    });
+
+    // 等待结果收集完成
+    let all_results = result_thread.join().unwrap_or_default();
 
     // 保存搜索历史
     let store = ConfigStore::new();
     let _ = store.add_search_history(query, all_results.len());
 
     // 发送搜索完成事件
-    let elapsed = scanner_for_time.get_elapsed_time();
+    let elapsed = start_time.elapsed().as_secs();
     #[derive(serde::Serialize, Clone)]
     struct SearchCompletedEvent {
         result_count: usize,
@@ -113,7 +134,7 @@ pub async fn search_files(
 
     // 重置搜索状态
     {
-        let mut is_searching = search_state.is_searching.lock().unwrap();
+        let mut is_searching = is_searching_arc.lock().unwrap();
         *is_searching = false;
     }
 
