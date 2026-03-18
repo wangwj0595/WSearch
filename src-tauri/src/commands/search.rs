@@ -1,6 +1,6 @@
 use crate::models::{SearchConfig, SearchResult};
-use crate::services::{ConfigStore, FileScanner, SearchProgress};
-use std::time::Instant;
+use crate::services::{ConfigStore, FileScanner};
+use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -23,7 +23,7 @@ impl Default for SearchState {
     }
 }
 
-/// 搜索文件（流式版本）
+/// 搜索文件（异步流式并行版本）
 #[tauri::command]
 pub async fn search_files(
     query: String,
@@ -69,48 +69,44 @@ pub async fn search_files(
     };
 
     let mut scanner = FileScanner::new(config);
+    let scanner_for_time = scanner.clone();
 
     // 克隆取消标志的 Arc 引用
     let is_cancelled = search_state.is_cancelled.clone();
 
-    // 克隆 app_handle 用于进度回调
-    let app_handle_clone = app_handle.clone();
+    // 使用异步流式并行搜索
+    let mut stream = scanner.search_streaming(query.clone(), is_cancelled).await;
 
-    // 流式搜索
-    let results = scanner.search_stream(
-        &query,
-        is_cancelled,
-        |batch_results| {
-            // 发送批次结果到前端
-            if !batch_results.is_empty() {
-                // 更新状态
-                {
-                    let mut results = search_state.results.lock().unwrap();
-                    results.extend(batch_results.clone());
-                }
-                // 发送批次结果到前端
-                let _ = app_handle.emit("search_result_batch", batch_results);
+    // 收集所有结果
+    let mut all_results = Vec::new();
+
+    // 遍历流，处理每个批次
+    while let Some(batch_results) = stream.next().await {
+        if !batch_results.is_empty() {
+            // 更新状态
+            {
+                let mut results = search_state.results.lock().unwrap();
+                results.extend(batch_results.clone());
             }
-        },
-        |progress: SearchProgress| {
-            // 发送搜索进度到前端
-            let _ = app_handle_clone.emit("search_progress", progress);
-        },
-    );
+            all_results.extend(batch_results.clone());
+            // 发送批次结果到前端
+            let _ = app_handle.emit("search_result_batch", batch_results);
+        }
+    }
 
     // 保存搜索历史
     let store = ConfigStore::new();
-    let _ = store.add_search_history(query, results.len());
+    let _ = store.add_search_history(query, all_results.len());
 
-    // 发送搜索完成事件（包含结果数和花费时间）
-    let elapsed = scanner.get_elapsed_time();
+    // 发送搜索完成事件
+    let elapsed = scanner_for_time.get_elapsed_time();
     #[derive(serde::Serialize, Clone)]
     struct SearchCompletedEvent {
         result_count: usize,
         elapsed_time: u64,
     }
     let event_data = SearchCompletedEvent {
-        result_count: results.len(),
+        result_count: all_results.len(),
         elapsed_time: elapsed,
     };
     let _ = app_handle.emit("search_completed", event_data);
