@@ -47,6 +47,7 @@ export interface WindowConfig {
   height: number;
   x: number;
   y: number;
+  is_maximized: boolean;
 }
 
 // 默认配置
@@ -66,4 +67,5 @@ export const defaultWindowConfig: WindowConfig = {
   height: 600,
   x: 0,
   y: 0,
+  is_maximized: false,
 };

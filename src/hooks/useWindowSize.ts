@@ -3,6 +3,12 @@ import { getCurrentWindow, LogicalSize, LogicalPosition } from '@tauri-apps/api/
 import { invoke } from '@tauri-apps/api/core';
 import { WindowConfig, defaultWindowConfig } from '../types';
 
+// 检查窗口位置是否有效（过滤最小化时的无效坐标 -32000）
+const isWindowPositionValid = (x: number, y: number): boolean => {
+  // Windows 最小化时位置为 -32000，这是无效位置
+  return x > -30000 && y > -30000;
+};
+
 export function useWindowSize() {
   const saveTimeoutRef = useRef<number | null>(null);
   const isInitializedRef = useRef(false);
@@ -27,10 +33,16 @@ export function useWindowSize() {
     }
   }, []);
 
-  // 应用窗口大小
+  // 应用窗口大小和最大化状态
   const applyWindowSize = useCallback(async (config: WindowConfig) => {
     try {
       const appWindow = getCurrentWindow();
+
+      // 如果保存了最大化状态，恢复最大化
+      if (config.is_maximized) {
+        await appWindow.maximize();
+        return;
+      }
 
       // 只在有有效值时设置
       if (config.width > 0 && config.height > 0) {
@@ -62,11 +74,35 @@ export function useWindowSize() {
         const size = await appWindow.outerSize();
         const position = await appWindow.outerPosition();
 
+        // 检查窗口是否最大化
+        const isMaximized = await appWindow.isMaximized();
+
+        // 如果最大化，保存最大化状态，不保存位置和大小
+        if (isMaximized) {
+          const config: WindowConfig = {
+            width: 0,
+            height: 0,
+            x: 0,
+            y: 0,
+            is_maximized: true,
+          };
+          await saveWindowConfig(config);
+          return;
+        }
+
+        // 检查窗口位置是否有效（最小化时位置为 -32000，无效）
+        if (!isWindowPositionValid(position.x, position.y)) {
+          // 位置无效（最小化状态），不保存任何配置
+          return;
+        }
+
+        // 正常窗口状态，保存位置和大小，不保存最大化
         const config: WindowConfig = {
           width: size.width,
           height: size.height,
           x: position.x,
           y: position.y,
+          is_maximized: false,
         };
 
         await saveWindowConfig(config);

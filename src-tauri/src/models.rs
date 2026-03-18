@@ -78,6 +78,7 @@ pub struct WindowConfig {
     pub height: u32,
     pub x: i32,
     pub y: i32,
+    pub is_maximized: bool,
 }
 
 /// 应用配置（包含搜索配置和历史）
