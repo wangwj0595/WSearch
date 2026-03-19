@@ -19,8 +19,10 @@ pub struct SearchConfig {
     pub file_types: Vec<String>,
     pub search_content: bool,
     pub case_sensitive: bool,
+    pub search_directories: bool,
     pub max_results: usize,
     pub sidebar_width: u32,
+    pub collapsed_panels: Vec<String>,
 }
 
 impl Default for SearchConfig {
@@ -37,8 +39,10 @@ impl Default for SearchConfig {
             file_types: Vec::new(),
             search_content: false,
             case_sensitive: false,
+            search_directories: true,
             max_results: 1000,
             sidebar_width: 280,
+            collapsed_panels: Vec::new(),
         }
     }
 }

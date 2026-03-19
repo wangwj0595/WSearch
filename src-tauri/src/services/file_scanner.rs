@@ -202,6 +202,11 @@ impl FileScanner {
                     }
                 }
 
+                // 如果不搜索目录，则跳过目录
+                if is_match && !config.search_directories && entry.file_type().is_dir() {
+                    is_match = false;
+                }
+
                 if is_match {
                     let metadata = entry.metadata().ok();
                     let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);

@@ -34,11 +34,145 @@ html, body, #root {
 .sidebar {
   background: #fff;
   border-right: 1px solid #e8e8e8;
-  padding: 12px;
+  padding: 16px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 0;
+}
+
+/* 折叠面板样式优化 */
+.sidebar .ant-collapse {
+  background: transparent;
+  border: none;
+}
+
+.sidebar .ant-collapse-item {
+  border-bottom: 1px solid #f0f0f0;
+  margin-bottom: 8px;
+}
+
+.sidebar .ant-collapse-item:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.sidebar .ant-collapse-header {
+  padding: 12px 0 !important;
+  align-items: center;
+}
+
+.sidebar .ant-collapse-content-box {
+  padding: 0 0 12px 0 !important;
+}
+
+/* 折叠面板头部布局 */
+.sidebar .collapse-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.sidebar .collapse-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar .collapse-header .ant-btn {
+  padding: 0 4px;
+  height: auto;
+  line-height: 1;
+}
+
+/* 列表样式优化 */
+.sidebar .ant-list {
+  background: transparent;
+}
+
+.sidebar .ant-list-item {
+  padding: 8px 12px !important;
+  border-bottom: 1px solid #f5f5f5;
+  transition: background 0.2s;
+}
+
+.sidebar .ant-list-item:hover {
+  background: #fafafa;
+}
+
+.sidebar .ant-list-item:last-child {
+  border-bottom: none;
+}
+
+.sidebar .ant-list-item-action {
+  margin-left: 8px;
+}
+
+/* 空状态提示 */
+.sidebar .ant-list-empty-text {
+  padding: 12px;
+  color: #999;
+  font-size: 12px;
+}
+
+/* 搜索选项复选框 */
+.sidebar .ant-checkbox-wrapper {
+  margin-bottom: 8px;
+}
+
+/* 最大结果数输入框组 */
+.sidebar .max-results-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.sidebar .max-results-wrapper .ant-typography {
+  color: #666;
+  font-size: 13px;
+}
+
+/* 清除历史按钮 */
+.sidebar .clear-history-btn {
+  margin-bottom: 8px;
+}
+
+/* 路径列表项 */
+.sidebar .path-item {
+  padding: 8px 12px !important;
+  border-bottom: 1px solid #f5f5f5;
+  transition: background 0.2s;
+}
+
+.sidebar .path-item:hover {
+  background: #fafafa;
+}
+
+.sidebar .path-item:last-child {
+  border-bottom: none;
+}
+
+/* 历史记录项 */
+.sidebar .history-item {
+  padding: 10px 12px !important;
+  border-bottom: 1px solid #f5f5f5;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.sidebar .history-item:hover {
+  background: #f0f5ff;
+}
+
+.sidebar .history-item:last-child {
+  border-bottom: none;
+}
+
+/* 折叠面板头部图标与文字间距 */
+.sidebar .ant-collapse-header-text {
+  flex: 1;
 }
 
 .main-content {
@@ -132,17 +266,39 @@ html, body, #root {
   }
 
   .sidebar {
+    background: #1f1f1f;
+    border-right-color: #303030;
+  }
+
+  .sidebar .ant-collapse-item {
+    border-bottom-color: #303030;
+  }
+
+  .sidebar .path-item,
+  .sidebar .history-item {
+    border-bottom-color: #303030;
+  }
+
+  .sidebar .path-item:hover {
     background: #262626;
-    border-right-color: #404040;
+  }
+
+  .sidebar .history-item:hover {
+    background: #1a1a3a;
+  }
+
+  .sidebar .ant-list-empty-text,
+  .sidebar .ant-typography {
+    color: #999;
   }
 
   .main-content {
-    background: #262626;
+    background: #1f1f1f;
     border-bottom-color: #404040;
   }
 
   .search-bar {
-    border-bottom-color: #404040;
+    border-bottom-color: #303030;
   }
 
   .results-header {

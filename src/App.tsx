@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ConfigProvider, message, Table, Button, Input, InputNumber, Space, Checkbox, List, Card, Typography, Tooltip, Progress, theme } from "antd";
+import { ConfigProvider, message, Table, Button, Input, InputNumber, Space, Checkbox, List, Typography, Tooltip, Progress, theme, Collapse } from "antd";
+import { FolderOpenOutlined, FolderOutlined, FileTextOutlined, HistoryOutlined, SettingOutlined, DeleteOutlined } from "@ant-design/icons";
 import type { SearchResult, SearchConfig, SearchHistory, SearchProgress, SearchCompletedEvent } from "./types";
 import type { RowSelectMethod } from "antd/es/table/interface";
 import { defaultSearchConfig } from "./types";
@@ -31,6 +32,25 @@ function AppContent() {
   const [searchKeyword, setSearchKeyword] = useState<string>("");
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [lastSelectedRow, setLastSelectedRow] = useState<number | null>(null);
+  const [activePanels, setActivePanels] = useState<string[]>(['search', 'exclude', 'options', 'history']);
+
+  // 从配置加载折叠面板状态
+  useEffect(() => {
+    if (config.collapsed_panels && config.collapsed_panels.length > 0) {
+      // 收起的面板不显示在 activePanels 中
+      const allPanels = ['search', 'exclude', 'options', 'history'];
+      setActivePanels(allPanels.filter(p => !config.collapsed_panels.includes(p)));
+    }
+  }, [config.collapsed_panels]);
+
+  // 保存折叠面板状态
+  const saveCollapsedPanels = useCallback((expandedPanels: string[]) => {
+    const allPanels = ['search', 'exclude', 'options', 'history'];
+    const collapsedPanels = allPanels.filter(p => !expandedPanels.includes(p));
+    const newConfig = { ...config, collapsed_panels: collapsedPanels };
+    setConfig(newConfig);
+    invoke("save_search_config", { config: newConfig });
+  }, [config]);
 
   // 加载配置和历史
   useEffect(() => {
@@ -221,6 +241,7 @@ function AppContent() {
         fileTypes: config.file_types,
         searchContent: config.search_content,
         caseSensitive: config.case_sensitive,
+        searchDirectories: config.search_directories,
         maxResults: config.max_results,
       });
       // 搜索历史会在 search_completed 事件中刷新
@@ -245,6 +266,55 @@ function AppContent() {
       await invoke("reveal_in_explorer", { path });
     } catch (e) {
       message.error(`显示失败: ${e}`);
+    }
+  };
+
+  // 删除单个文件
+  const handleDeleteFile = async (path: string) => {
+    try {
+      const result = await invoke<string>("delete_file", { path });
+      message.success(result);
+      // 从结果中移除已删除的文件
+      setResults(prev => prev.filter(item => item.path !== path));
+      setTotalResults(prev => Math.max(0, prev - 1));
+      // 清除选中状态
+      setSelectedRowKeys(prev => prev.filter(key => key !== path));
+    } catch (e) {
+      message.error(`删除失败: ${e}`);
+    }
+  };
+
+  // 批量删除文件
+  const handleBatchDelete = async () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning("请先选择要删除的文件");
+      return;
+    }
+
+    try {
+      const paths = selectedRowKeys.map(key => key as string);
+      const result = await invoke<string[]>("delete_files", { paths });
+
+      if (result.length === 1) {
+        message.success(result[0]);
+      } else {
+        // 显示成功和失败信息
+        result.forEach(msg => {
+          if (msg.includes("成功")) {
+            message.success(msg);
+          } else {
+            message.warning(msg);
+          }
+        });
+      }
+
+      // 从结果中移除已删除的文件
+      setResults(prev => prev.filter(item => !selectedRowKeys.includes(item.path)));
+      setTotalResults(prev => Math.max(0, prev - selectedRowKeys.length));
+      // 清除选中状态
+      setSelectedRowKeys([]);
+    } catch (e) {
+      message.error(`批量删除失败: ${e}`);
     }
   };
 
@@ -321,11 +391,18 @@ function AppContent() {
     {
       title: "操作",
       key: "action",
-      width: 150,
+      width: 180,
       render: (_: unknown, record: SearchResult) => (
         <Space size="small">
           <Button size="small" onClick={() => handleOpenFile(record.path)}>打开</Button>
           <Button size="small" onClick={() => handleReveal(record.path)}>定位</Button>
+          <Button
+            size="small"
+            danger
+            onClick={() => handleDeleteFile(record.path)}
+          >
+            删除
+          </Button>
         </Space>
       ),
     },
@@ -334,97 +411,231 @@ function AppContent() {
   return (
     <div className="app-container">
       <div className="sidebar" style={{ width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` }}>
-        <Card size="small" title="搜索目录" extra={<Button type="link" size="small" onClick={addSearchPath}>+ 添加</Button>}>
-          <List
-            size="small"
-            dataSource={config.search_paths}
-            renderItem={(item) => (
-              <List.Item
-                actions={[<Button key="remove" type="link" danger size="small" onClick={() => removeSearchPath(item)}>×</Button>]}
-              >
-                <Text ellipsis style={{ fontSize: 12 }}>📁 {item}</Text>
-              </List.Item>
-            )}
-          />
-        </Card>
-
-        <Card size="small" title="排除目录" extra={<Button type="link" size="small" onClick={addExcludePath}>+ 添加</Button>}>
-          <List
-            size="small"
-            dataSource={config.exclude_paths}
-            renderItem={(item) => (
-              <List.Item
-                actions={[<Button key="remove" type="link" danger size="small" onClick={() => removeExcludePath(item)}>×</Button>]}
-              >
-                <Text ellipsis style={{ fontSize: 12 }}>🚫 {item}</Text>
-              </List.Item>
-            )}
-          />
-        </Card>
-
-        <Card size="small" title="搜索选项">
-          <Space direction="vertical" style={{ width: "100%" }} size="small">
-            <Checkbox
-              checked={config.search_content}
-              onChange={(e) => {
-                const newConfig = { ...config, search_content: e.target.checked };
-                setConfig(newConfig);
-                invoke("save_search_config", { config: newConfig });
-              }}
-            >
-              搜索文件内容
-            </Checkbox>
-            <Checkbox
-              checked={config.case_sensitive}
-              onChange={(e) => {
-                const newConfig = { ...config, case_sensitive: e.target.checked };
-                setConfig(newConfig);
-                invoke("save_search_config", { config: newConfig });
-              }}
-            >
-              区分大小写
-            </Checkbox>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Text style={{ fontSize: 12 }}>最大结果数:</Text>
-              <InputNumber
+        <Collapse
+          activeKey={activePanels}
+          ghost
+          expandIconPosition="end"
+          onChange={(keys) => {
+            saveCollapsedPanels(keys as string[]);
+          }}
+        >
+          <Collapse.Panel
+            key="search"
+            header={
+              <div className="collapse-header">
+                <div className="collapse-header-left">
+                  <FolderOpenOutlined style={{ color: '#1890ff', fontSize: 14 }} />
+                  <Text strong>搜索目录</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>({config.search_paths.length})</Text>
+                </div>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<FolderOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    addSearchPath();
+                  }}
+                />
+              </div>
+            }
+          >
+            {config.search_paths.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', textAlign: 'center', padding: '12px 0' }}>
+                点击上方 + 添加搜索目录
+              </Text>
+            ) : (
+              <List
                 size="small"
-                min={1}
-                max={10000}
-                value={config.max_results}
-                onChange={(value) => {
-                  if (value) {
-                    const newConfig = { ...config, max_results: value };
-                    setConfig(newConfig);
-                    invoke("save_search_config", { config: newConfig });
-                  }
-                }}
-                style={{ width: 100 }}
+                dataSource={config.search_paths}
+                renderItem={(item) => (
+                  <List.Item
+                    className="path-item"
+                    actions={[
+                      <Button
+                        key="remove"
+                        type="text"
+                        danger
+                        size="small"
+                        onClick={() => removeSearchPath(item)}
+                      >
+                        <DeleteOutlined />
+                      </Button>
+                    ]}
+                  >
+                    <Text ellipsis style={{ fontSize: 12 }}>{item}</Text>
+                  </List.Item>
+                )}
               />
-            </div>
-          </Space>
-        </Card>
-
-        <Card size="small" title="搜索历史" extra={
-          history.length > 0 && <Button type="link" size="small" danger onClick={handleClearHistory}>清除</Button>
-        }>
-          <List
-            size="small"
-            dataSource={history.slice(0, 10)}
-            renderItem={(item) => (
-              <List.Item style={{ cursor: "pointer", padding: "4px 8px" }} onClick={async () => {
-                // 如果正在搜索，先取消当前搜索
-                if (loading) {
-                  await handleCancelSearch();
-                }
-                setSearchKeyword(item.query);
-                handleSearch(item.query);
-              }}>
-                <Text ellipsis>{item.query}</Text>
-                <Text type="secondary" style={{ fontSize: 10 }}>({item.result_count})</Text>
-              </List.Item>
             )}
-          />
-        </Card>
+          </Collapse.Panel>
+
+          <Collapse.Panel
+            key="exclude"
+            header={
+              <div className="collapse-header">
+                <div className="collapse-header-left">
+                  <FolderOutlined style={{ color: '#ff4d4f', fontSize: 14 }} />
+                  <Text strong>排除目录</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>({config.exclude_paths.length})</Text>
+                </div>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<FolderOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    addExcludePath();
+                  }}
+                />
+              </div>
+            }
+          >
+            {config.exclude_paths.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', textAlign: 'center', padding: '12px 0' }}>
+                点击上方 + 添加排除目录
+              </Text>
+            ) : (
+              <List
+                size="small"
+                dataSource={config.exclude_paths}
+                renderItem={(item) => (
+                  <List.Item
+                    className="path-item"
+                    actions={[
+                      <Button
+                        key="remove"
+                        type="text"
+                        danger
+                        size="small"
+                        onClick={() => removeExcludePath(item)}
+                      >
+                        <DeleteOutlined />
+                      </Button>
+                    ]}
+                  >
+                    <Text ellipsis style={{ fontSize: 12 }}>{item}</Text>
+                  </List.Item>
+                )}
+              />
+            )}
+          </Collapse.Panel>
+
+          <Collapse.Panel
+            key="options"
+            header={
+              <div className="collapse-header">
+                <div className="collapse-header-left">
+                  <SettingOutlined style={{ color: '#52c41a', fontSize: 14 }} />
+                  <Text strong>搜索选项</Text>
+                </div>
+              </div>
+            }
+          >
+            <Space direction="vertical" style={{ width: "100%" }} size="middle">
+              <Checkbox
+                checked={config.search_content}
+                onChange={(e) => {
+                  const newConfig = { ...config, search_content: e.target.checked };
+                  setConfig(newConfig);
+                  invoke("save_search_config", { config: newConfig });
+                }}
+              >
+                <FileTextOutlined style={{ marginRight: 6 }} />
+                搜索文件内容
+              </Checkbox>
+              <Checkbox
+                checked={config.search_directories}
+                onChange={(e) => {
+                  const newConfig = { ...config, search_directories: e.target.checked };
+                  setConfig(newConfig);
+                  invoke("save_search_config", { config: newConfig });
+                }}
+              >
+                <FolderOpenOutlined style={{ marginRight: 6 }} />
+                搜索目录
+              </Checkbox>
+              <Checkbox
+                checked={config.case_sensitive}
+                onChange={(e) => {
+                  const newConfig = { ...config, case_sensitive: e.target.checked };
+                  setConfig(newConfig);
+                  invoke("save_search_config", { config: newConfig });
+                }}
+              >
+                区分大小写
+              </Checkbox>
+              <div className="max-results-wrapper">
+                <Text style={{ fontSize: 13 }}>最大结果数:</Text>
+                <InputNumber
+                  size="small"
+                  min={1}
+                  max={10000}
+                  value={config.max_results}
+                  onChange={(value) => {
+                    if (value) {
+                      const newConfig = { ...config, max_results: value };
+                      setConfig(newConfig);
+                      invoke("save_search_config", { config: newConfig });
+                    }
+                  }}
+                  style={{ width: 100 }}
+                />
+              </div>
+            </Space>
+          </Collapse.Panel>
+
+          <Collapse.Panel
+            key="history"
+            header={
+              <div className="collapse-header">
+                <div className="collapse-header-left">
+                  <HistoryOutlined style={{ color: '#faad14', fontSize: 14 }} />
+                  <Text strong>搜索历史</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>({history.length})</Text>
+                </div>
+                {history.length > 0 && (
+                  <Button
+                    type="text"
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleClearHistory();
+                    }}
+                  />
+                )}
+              </div>
+            }
+          >
+            {history.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', textAlign: 'center', padding: '12px 0' }}>
+                暂无搜索历史
+              </Text>
+            ) : (
+              <List
+                size="small"
+                dataSource={history.slice(0, 10)}
+                renderItem={(item) => (
+                  <List.Item
+                    className="history-item"
+                    onClick={async () => {
+                      if (loading) {
+                        await handleCancelSearch();
+                      }
+                      setSearchKeyword(item.query);
+                      handleSearch(item.query);
+                    }}
+                  >
+                    <Text ellipsis>{item.query}</Text>
+                    <Text type="secondary" style={{ fontSize: 11, marginLeft: 8 }}>({item.result_count})</Text>
+                  </List.Item>
+                )}
+              />
+            )}
+          </Collapse.Panel>
+        </Collapse>
       </div>
 
       <div
@@ -536,16 +747,25 @@ function AppContent() {
                   </Text>
                 )}
                 {selectedRowKeys.length > 0 && (
-                  <Button
-                    size="small"
-                    type="primary"
-                    onClick={() => {
-                      const selectedItems = results.filter(item => selectedRowKeys.includes(item.path));
-                      selectedItems.forEach(item => handleOpenFile(item.path));
-                    }}
-                  >
-                    打开选中 ({selectedRowKeys.length})
-                  </Button>
+                  <>
+                    <Button
+                      size="small"
+                      type="primary"
+                      onClick={() => {
+                        const selectedItems = results.filter(item => selectedRowKeys.includes(item.path));
+                        selectedItems.forEach(item => handleOpenFile(item.path));
+                      }}
+                    >
+                      打开选中 ({selectedRowKeys.length})
+                    </Button>
+                    <Button
+                      size="small"
+                      danger
+                      onClick={handleBatchDelete}
+                    >
+                      批量删除 ({selectedRowKeys.length})
+                    </Button>
+                  </>
                 )}
               </Space>
             )}

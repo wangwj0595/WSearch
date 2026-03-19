@@ -34,6 +34,7 @@ pub async fn search_files(
     file_types: Vec<String>,
     search_content: bool,
     case_sensitive: bool,
+    search_directories: bool,
     max_results: usize,
     app_handle: AppHandle,
     search_state: State<'_, SearchState>,
@@ -66,8 +67,10 @@ pub async fn search_files(
         file_types,
         search_content,
         case_sensitive,
+        search_directories,
         max_results,
         sidebar_width: 280,
+        collapsed_panels: Vec::new(),
     };
 
     let scanner = FileScanner::new(config);

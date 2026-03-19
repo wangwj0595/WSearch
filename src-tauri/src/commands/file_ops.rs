@@ -97,3 +97,73 @@ pub fn copy_path(path: String) -> Result<(), String> {
 
     Ok(())
 }
+
+/// 删除单个文件或目录
+#[tauri::command]
+pub fn delete_file(path: String) -> Result<String, String> {
+    let path_obj = std::path::Path::new(&path);
+
+    if !path_obj.exists() {
+        return Err("文件或目录不存在".to_string());
+    }
+
+    let result = if path_obj.is_dir() {
+        std::fs::remove_dir_all(&path)
+    } else {
+        std::fs::remove_file(&path)
+    };
+
+    match result {
+        Ok(_) => {
+            log::info!("删除成功: {}", path);
+            Ok(format!("已删除: {}", path))
+        }
+        Err(e) => {
+            log::error!("删除失败: {} - {}", path, e);
+            Err(format!("删除失败: {}", e))
+        }
+    }
+}
+
+/// 批量删除文件或目录
+#[tauri::command]
+pub fn delete_files(paths: Vec<String>) -> Result<Vec<String>, String> {
+    let mut success_count = 0;
+    let mut failed_paths: Vec<String> = Vec::new();
+
+    for path in &paths {
+        let path_obj = std::path::Path::new(path);
+
+        if !path_obj.exists() {
+            failed_paths.push(format!("{} - 文件不存在", path));
+            continue;
+        }
+
+        let result = if path_obj.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+
+        match result {
+            Ok(_) => {
+                success_count += 1;
+                log::info!("删除成功: {}", path);
+            }
+            Err(e) => {
+                failed_paths.push(format!("{} - {}", path, e));
+                log::error!("删除失败: {} - {}", path, e);
+            }
+        }
+    }
+
+    if failed_paths.is_empty() {
+        Ok(vec![format!("成功删除 {} 个项目", success_count)])
+    } else if success_count > 0 {
+        let mut messages = vec![format!("成功删除 {} 个项目", success_count)];
+        messages.extend(failed_paths);
+        Ok(messages)
+    } else {
+        Err("所有删除操作均失败".to_string())
+    }
+}

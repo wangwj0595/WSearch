@@ -15,8 +15,10 @@ export interface SearchConfig {
   file_types: string[];
   search_content: boolean;
   case_sensitive: boolean;
+  search_directories: boolean;
   max_results: number;
   sidebar_width: number;
+  collapsed_panels: string[];
 }
 
 // 搜索历史
@@ -57,8 +59,10 @@ export const defaultSearchConfig: SearchConfig = {
   file_types: [],
   search_content: false,
   case_sensitive: false,
+  search_directories: true,
   max_results: 3000,
   sidebar_width: 280,
+  collapsed_panels: [],
 };
 
 // 默认窗口配置
