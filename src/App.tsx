@@ -242,6 +242,7 @@ function AppContent() {
         searchContent: config.search_content,
         caseSensitive: config.case_sensitive,
         searchDirectories: config.search_directories,
+        useMft: config.use_mft,
         maxResults: config.max_results,
       });
       // 搜索历史会在 search_completed 事件中刷新
@@ -564,6 +565,16 @@ function AppContent() {
                 }}
               >
                 区分大小写
+              </Checkbox>
+              <Checkbox
+                checked={config.use_mft}
+                onChange={(e) => {
+                  const newConfig = { ...config, use_mft: e.target.checked };
+                  setConfig(newConfig);
+                  invoke("save_search_config", { config: newConfig });
+                }}
+              >
+                MFT 快速搜索
               </Checkbox>
               <div className="max-results-wrapper">
                 <Text style={{ fontSize: 13 }}>最大结果数:</Text>

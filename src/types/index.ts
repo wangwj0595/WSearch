@@ -16,6 +16,7 @@ export interface SearchConfig {
   search_content: boolean;
   case_sensitive: boolean;
   search_directories: boolean;
+  use_mft: boolean;
   max_results: number;
   sidebar_width: number;
   collapsed_panels: string[];
@@ -60,6 +61,7 @@ export const defaultSearchConfig: SearchConfig = {
   search_content: false,
   case_sensitive: false,
   search_directories: true,
+  use_mft: false,
   max_results: 3000,
   sidebar_width: 280,
   collapsed_panels: [],

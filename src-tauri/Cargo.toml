@@ -1,6 +1,6 @@
 [package]
 name = "wsearch"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Tauri App"
 authors = ["wangwj0595"]
 edition = "2021"
@@ -34,3 +34,14 @@ async-stream = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
 dirs = "5.0"
+lazy_static = "1.4"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_Security",
+] }
+usnjrnl-forensic = "0.6.0"
+ntfs-reader = "0.4.4"

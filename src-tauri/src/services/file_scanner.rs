@@ -1,12 +1,35 @@
 use crate::models::{SearchConfig, SearchResult};
+use crate::services::mft_reader;
 use rayon::prelude::*;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender, Receiver};
+use std::sync::Mutex;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 use walkdir::WalkDir;
+
+// MFT 索引缓存（全局单例）
+lazy_static::lazy_static! {
+    static ref MFT_INDEX: Mutex<Option<MftIndex>> = Mutex::new(None);
+}
+
+// MFT 索引结构
+#[derive(Clone)]
+struct MftIndex {
+    entries: Vec<MftEntry>,
+    last_update: std::time::Instant,
+}
+
+#[derive(Clone)]
+struct MftEntry {
+    name: String,
+    path: String,
+    size: u64,
+    modified_time: String,
+    is_directory: bool,
+}
 
 /// 搜索进度信息
 #[derive(Debug, Clone, serde::Serialize)]
@@ -83,6 +106,22 @@ impl FileScanner {
         progress_tx: Sender<SearchProgress>,
         is_cancelled: Arc<AtomicBool>,
     ) {
+        // 根据配置选择搜索方式
+        if config.use_mft {
+            Self::search_worker_mft(config, query, result_tx, progress_tx, is_cancelled);
+        } else {
+            Self::search_worker_walkdir(config, query, result_tx, progress_tx, is_cancelled);
+        }
+    }
+
+    /// WalkDir 搜索（传统方式）
+    fn search_worker_walkdir(
+        config: SearchConfig,
+        query: String,
+        result_tx: Sender<SearchResultItem>,
+        progress_tx: Sender<SearchProgress>,
+        is_cancelled: Arc<AtomicBool>,
+    ) {
         let start_time = Instant::now();
         let scanned_count = AtomicU64::new(0);
         let found_count = AtomicU64::new(0);
@@ -112,7 +151,6 @@ impl FileScanner {
             }
 
             // 使用 rayon 并行处理 WalkDir 条目
-            // 注意：WalkDir 不支持并行直接迭代，我们先收集再并行处理
             let entries: Vec<_> = WalkDir::new(path)
                 .follow_links(false)
                 .into_iter()
@@ -245,6 +283,255 @@ impl FileScanner {
             estimated_remaining: 0,
         };
         let _ = progress_tx.send(progress);
+    }
+
+    /// MFT 搜索（快速方式）
+    #[cfg(windows)]
+    fn search_worker_mft(
+        config: SearchConfig,
+        query: String,
+        result_tx: Sender<SearchResultItem>,
+        progress_tx: Sender<SearchProgress>,
+        is_cancelled: Arc<AtomicBool>,
+    ) {
+        let start_time = Instant::now();
+        let found_count = AtomicU64::new(0);
+
+        // 发送初始进度
+        let _ = progress_tx.send(SearchProgress {
+            scanned_count: 0,
+            found_count: 0,
+            current_path: "正在建立 MFT 索引...".to_string(),
+            elapsed_time: 0,
+            estimated_remaining: 0,
+        });
+
+        // 获取或更新 MFT 索引
+        let entries = Self::get_or_build_mft_index(&config.search_paths);
+
+        if entries.is_empty() {
+            // 索引为空，回退到 WalkDir
+            return Self::search_worker_walkdir(config, query, result_tx, progress_tx, is_cancelled);
+        }
+
+        // 解析关键词
+        let keywords: Vec<String> = query
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if config.case_sensitive {
+                    s.to_string()
+                } else {
+                    s.to_lowercase()
+                }
+            })
+            .collect();
+
+        let max_results = config.max_results as u64;
+        let scanned_total = AtomicU64::new(0);
+        let total_entries = entries.len() as u64;
+
+        // 在内存中搜索（非常快）
+        for entry in entries {
+            if is_cancelled.load(Ordering::SeqCst) {
+                break;
+            }
+
+            if found_count.load(Ordering::SeqCst) >= max_results {
+                break;
+            }
+
+            let scanned = scanned_total.fetch_add(1, Ordering::SeqCst);
+
+            // 每扫描1000个文件发送一次进度
+            if scanned % 1000 == 0 {
+                let elapsed = start_time.elapsed().as_secs();
+                let progress = SearchProgress {
+                    scanned_count: scanned,
+                    found_count: found_count.load(Ordering::SeqCst),
+                    current_path: entry.path.clone(),
+                    elapsed_time: elapsed,
+                    estimated_remaining: 0,
+                };
+                let _ = progress_tx.send(progress);
+            }
+
+            // 检查文件名匹配
+            let name_check = if config.case_sensitive {
+                entry.name.clone()
+            } else {
+                entry.name.to_lowercase()
+            };
+
+            let mut is_match = keywords.iter().all(|k| name_check.contains(k));
+
+            // 检查文件类型过滤
+            if is_match && !config.file_types.is_empty() {
+                if let Some(ext) = entry.path.rsplit('.').next() {
+                    let ext_str = ext.to_lowercase();
+                    is_match = config.file_types.iter().any(|t| {
+                        let t_low = t.to_lowercase();
+                        t_low == ext_str || t_low == format!(".{}", ext_str)
+                    });
+                } else {
+                    is_match = false;
+                }
+            }
+
+            // 如果不搜索目录，则跳过目录
+            if is_match && !config.search_directories && entry.is_directory {
+                continue;
+            }
+
+            if is_match {
+                let result = SearchResult {
+                    name: entry.name,
+                    path: entry.path,
+                    is_directory: entry.is_directory,
+                    size: entry.size,
+                    modified_time: entry.modified_time,
+                    match_content: None,
+                };
+
+                let item = SearchResultItem {
+                    result,
+                    scanned_count: scanned,
+                };
+                let _ = result_tx.send(item);
+                found_count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        // 发送最终进度
+        let elapsed = start_time.elapsed().as_secs();
+        let progress = SearchProgress {
+            scanned_count: scanned_total.load(Ordering::SeqCst),
+            found_count: found_count.load(Ordering::SeqCst),
+            current_path: String::new(),
+            elapsed_time: elapsed,
+            estimated_remaining: 0,
+        };
+        let _ = progress_tx.send(progress);
+    }
+
+    /// 非 Windows 平台回退到 WalkDir
+    #[cfg(not(windows))]
+    fn search_worker_mft(
+        config: SearchConfig,
+        query: String,
+        result_tx: Sender<SearchResultItem>,
+        progress_tx: Sender<SearchProgress>,
+        is_cancelled: Arc<AtomicBool>,
+    ) {
+        // 非 Windows 平台直接使用 WalkDir
+        Self::search_worker_walkdir(config, query, result_tx, progress_tx, is_cancelled);
+    }
+
+    /// 获取或构建 MFT 索引
+    #[cfg(windows)]
+    fn get_or_build_mft_index(search_paths: &[String]) -> Vec<MftEntry> {
+        // 检查缓存是否有效（5分钟内有效）
+        {
+            let index_guard = MFT_INDEX.lock().unwrap();
+            if let Some(ref index) = *index_guard {
+                if index.last_update.elapsed().as_secs() < 300 {
+                    return index.entries.clone();
+                }
+            }
+        }
+
+        // 使用真正的 NTFS MFT/USN Journal 读取
+        let mut entries = Vec::new();
+
+        for search_path in search_paths {
+            // 获取卷根路径（例如 D:\）
+            let volume_root = Self::get_volume_root(search_path);
+
+            if !volume_root.is_empty() && mft_reader::is_ntfs_volume(&volume_root) {
+                log::info!("正在使用 NTFS MFT 扫描卷: {}", volume_root);
+
+                // 使用真正的 MFT 读取
+                let mft_entries = mft_reader::scan_volume_files(&volume_root);
+
+                for mft_entry in mft_entries {
+                    // 过滤出在搜索路径下的文件
+                    if mft_entry.path.starts_with(search_path) || search_path.len() <= 3 {
+                        entries.push(MftEntry {
+                            name: mft_entry.name,
+                            path: mft_entry.path,
+                            size: mft_entry.size,
+                            modified_time: mft_entry.modified_time,
+                            is_directory: mft_entry.is_directory,
+                        });
+                    }
+                }
+            } else {
+                // 非 NTFS 卷或无法识别，使用 WalkDir 回退
+                log::info!("卷 {} 不是 NTFS 或无法识别，使用 WalkDir", volume_root);
+                Self::build_index_walkdir(search_path, &mut entries);
+            }
+        }
+
+        // 更新缓存
+        {
+            let mut index_guard = MFT_INDEX.lock().unwrap();
+            *index_guard = Some(MftIndex {
+                entries: entries.clone(),
+                last_update: std::time::Instant::now(),
+            });
+        }
+
+        log::info!("MFT 索引构建完成，共 {} 个文件", entries.len());
+        entries
+    }
+
+    /// 获取路径的卷根路径
+    #[cfg(windows)]
+    fn get_volume_root(path: &str) -> String {
+        let p = Path::new(path);
+        if let Some(root) = p.components().next() {
+            if let Some(drive) = root.as_os_str().to_str() {
+                return format!("{}\\", drive);
+            }
+        }
+        String::new()
+    }
+
+    /// 使用 WalkDir 构建索引（回退方案）
+    #[cfg(windows)]
+    fn build_index_walkdir(search_path: &str, entries: &mut Vec<MftEntry>) {
+        let path = Path::new(search_path);
+        if !path.exists() {
+            return;
+        }
+
+        for entry in WalkDir::new(path)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path_str = entry.path().to_string_lossy().to_string();
+            let is_dir = entry.file_type().is_dir();
+            let size = metadata.len();
+            let modified = metadata
+                .modified()
+                .map(format_time)
+                .unwrap_or_default();
+
+            entries.push(MftEntry {
+                name,
+                path: path_str,
+                size,
+                modified_time: modified,
+                is_directory: is_dir,
+            });
+        }
     }
 
     /// 获取搜索花费的时间
