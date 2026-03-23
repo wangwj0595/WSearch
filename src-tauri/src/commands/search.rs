@@ -1,6 +1,7 @@
 use crate::models::{SearchConfig, SearchResult};
 use crate::services::config_store::ConfigStore;
 use crate::services::file_scanner::FileScanner;
+use crate::services::trigger_incremental_update;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -58,6 +59,9 @@ pub async fn search_files(
         let mut results = search_state.results.lock().unwrap();
         results.clear();
     }
+
+    // 在搜索前先触发一次增量更新，确保索引是最新的
+    // let _ = trigger_incremental_update();
 
     // 发送搜索开始事件
     let _ = app_handle.emit("search_started", ());
@@ -190,4 +194,65 @@ pub fn cancel_search(search_state: State<'_, SearchState>) -> Result<(), String>
     let mut is_searching = search_state.is_searching.lock().unwrap();
     *is_searching = false;
     Ok(())
+}
+
+/// 更新索引（强制重建指定卷的索引）
+#[tauri::command]
+pub async fn refresh_index(volume: String) -> Result<String, String> {
+    use crate::services::file_scanner::FileScanner;
+    use crate::services::index_cache::get_cache_manager;
+    use crate::services::mft_reader;
+    use crate::services::is_running_as_admin;
+    use crate::services::usn_monitor;
+
+    // 检查管理员权限
+    if !is_running_as_admin() {
+        return Err("需要管理员权限才能更新索引".to_string());
+    }
+
+    // 检查 NTFS 卷
+    if !mft_reader::is_ntfs_volume(&volume) {
+        return Err(format!("卷 {} 不是 NTFS 格式", volume));
+    }
+
+    log::info!("开始更新卷 {} 的索引", volume);
+
+    // 重建索引前先停止 USN Monitor，避免竞争条件
+    log::info!("停止 USN Monitor");
+    usn_monitor::stop_incremental_service();
+
+    // 等待一小段时间让后台线程完成
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // 读取 MFT
+    let mft_entries = mft_reader::scan_volume_files(&volume);
+
+    if mft_entries.is_empty() {
+        // 恢复 USN Monitor
+        let _ = usn_monitor::start_incremental_service(vec![volume.clone()]);
+        return Err("无法读取 MFT 数据".to_string());
+    }
+
+    // 获取缓存管理器并更新索引
+    let cache_manager = get_cache_manager();
+
+    // 检查是否已有该卷的索引
+    if cache_manager.has_path(&volume) {
+        // 已有索引，完全替换
+        cache_manager.update_from_mft(mft_entries, &volume);
+    } else {
+        // 新卷，增量添加
+        cache_manager.add_volume_from_mft(mft_entries, &volume);
+    }
+
+    log::info!("卷 {} 索引更新完成，重启 USN Monitor", volume);
+
+    // 重建索引后重新启动 USN Monitor
+    // 注意：start_incremental_service 会自动加载之前保存的 USN 状态
+    if let Err(e) = usn_monitor::start_incremental_service(vec![volume.clone()]) {
+        log::warn!("重启 USN Monitor 失败: {}", e);
+    }
+
+    log::info!("卷 {} 索引更新完成", volume);
+    Ok(format!("索引更新成功，共 {} 个文件", cache_manager.file_count()))
 }

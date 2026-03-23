@@ -1,5 +1,8 @@
 use crate::models::{SearchConfig, SearchResult};
 use crate::services::mft_reader;
+use crate::services::index_cache::{self, get_cache_manager, SearchResultEntry as CacheSearchResult};
+use crate::services::usn_monitor;
+use crate::services::is_running_as_admin;
 use rayon::prelude::*;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -9,19 +12,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 use walkdir::WalkDir;
+use aho_corasick::AhoCorasick;
 
-// MFT 索引缓存（全局单例）
-lazy_static::lazy_static! {
-    static ref MFT_INDEX: Mutex<Option<MftIndex>> = Mutex::new(None);
-}
-
-// MFT 索引结构
-#[derive(Clone)]
-struct MftIndex {
-    entries: Vec<MftEntry>,
-    last_update: std::time::Instant,
-}
-
+// MFT 条目结构（用于内存索引）
 #[derive(Clone)]
 struct MftEntry {
     name: String,
@@ -29,6 +22,64 @@ struct MftEntry {
     size: u64,
     modified_time: String,
     is_directory: bool,
+}
+
+// 高效搜索器（使用 Aho-Corasick 多模式匹配）
+struct FastSearcher {
+    matcher: Option<AhoCorasick>,
+    keywords: Vec<String>,
+}
+
+impl FastSearcher {
+    fn new(query: &str, case_sensitive: bool) -> Self {
+        let keywords: Vec<String> = query
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if case_sensitive {
+                    s.to_string()
+                } else {
+                    s.to_lowercase()
+                }
+            })
+            .collect();
+
+        if keywords.is_empty() {
+            return Self {
+                matcher: None,
+                keywords: Vec::new(),
+            };
+        }
+
+        // 构建 Aho-Corasick 自动机
+        let patterns: Vec<&str> = keywords.iter().map(|s| s.as_str()).collect();
+        let matcher = AhoCorasick::new(&patterns).ok();
+
+        Self { matcher, keywords }
+    }
+
+    fn is_match(&self, text: &str) -> bool {
+        if self.keywords.is_empty() {
+            return false;
+        }
+
+        let text = text;  // 使用引用避免复制
+
+        if let Some(ref matcher) = self.matcher {
+            // 使用 Aho-Corasick 进行多模式匹配
+            let mut found_count = 0;
+            for _ in matcher.find_iter(text) {
+                found_count += 1;
+                if found_count == self.keywords.len() {
+                    return true;
+                }
+            }
+            false
+        } else {
+            // 回退到普通匹配
+            self.keywords.iter().all(|k| text.contains(k))
+        }
+    }
 }
 
 /// 搜索进度信息
@@ -296,7 +347,129 @@ impl FileScanner {
     ) {
         let start_time = Instant::now();
         let found_count = AtomicU64::new(0);
+        let cache_manager = get_cache_manager();
 
+        // 首先尝试加载缓存（如果还没有加载或之前加载失败）
+        if !cache_manager.is_valid() {
+            log::info!("缓存无效，尝试加载缓存文件...");
+            if !cache_manager.load_cache() {
+                log::info!("缓存加载失败，将重建索引");
+            }
+        }
+
+        // 检查是否有新卷需要建立索引
+        let volumes_to_index = cache_manager.get_volumes_to_index(&config.search_paths);
+
+        if !volumes_to_index.is_empty() {
+            // 有新卷需要索引，先建立索引
+            log::info!("检测到 {} 个新卷需要索引: {:?}", volumes_to_index.len(), volumes_to_index);
+
+            // 发送初始进度
+            let _ = progress_tx.send(SearchProgress {
+                scanned_count: 0,
+                found_count: 0,
+                current_path: "正在为新卷建立索引...".to_string(),
+                elapsed_time: 0,
+                estimated_remaining: 0,
+            });
+
+            // 调用 get_or_build_mft_index 来增量添加新卷
+            let _entries = Self::get_or_build_mft_index(&config.search_paths);
+        }
+
+        // 检查缓存是否有效
+        if cache_manager.is_valid() {
+            // 缓存有效，先启动增量更新服务并触发一次增量更新
+            log::info!("缓存有效，启动增量更新并同步最新文件变化...");
+
+            // 发送初始进度
+            let _ = progress_tx.send(SearchProgress {
+                scanned_count: 0,
+                found_count: 0,
+                current_path: "正在同步文件变化...".to_string(),
+                elapsed_time: 0,
+                estimated_remaining: 0,
+            });
+
+            // 启动增量更新服务（如果尚未启动）
+            Self::start_incremental_service_if_needed(&config.search_paths);
+
+            // 手动触发一次增量更新，将新的文件变化同步到缓存
+            let _ = usn_monitor::trigger_incremental_update();
+
+            // 同步完成后，使用缓存搜索
+            log::info!("文件变化同步完成，使用缓存索引搜索，文件数: {}", cache_manager.file_count());
+
+            // 发送搜索进度
+            let _ = progress_tx.send(SearchProgress {
+                scanned_count: 0,
+                found_count: 0,
+                current_path: "正在从缓存搜索...".to_string(),
+                elapsed_time: 0,
+                estimated_remaining: 0,
+            });
+
+            // 使用缓存搜索（传入搜索路径进行过滤）
+            let results = cache_manager.search(&query, config.case_sensitive, config.max_results, &config.search_paths);
+
+            for (idx, entry) in results.into_iter().enumerate() {
+                if is_cancelled.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                // 检查文件类型过滤
+                let mut is_match = true;
+                if !config.file_types.is_empty() {
+                    if let Some(ext) = std::path::Path::new(&entry.path).extension() {
+                        let ext_str = ext.to_string_lossy().to_lowercase();
+                        is_match = config.file_types.iter().any(|t| {
+                            let t_low = t.to_lowercase();
+                            t_low == ext_str || t_low == format!(".{}", ext_str)
+                        });
+                    } else {
+                        is_match = false;
+                    }
+                }
+
+                // 如果不搜索目录，则跳过目录
+                if is_match && !config.search_directories && entry.is_directory {
+                    continue;
+                }
+
+                if is_match {
+                    let result = SearchResult {
+                        name: entry.name,
+                        path: entry.path,
+                        is_directory: entry.is_directory,
+                        size: entry.size,
+                        modified_time: entry.modified_time,
+                        match_content: None,
+                    };
+
+                    let item = SearchResultItem {
+                        result,
+                        scanned_count: idx as u64,
+                    };
+                    let _ = result_tx.send(item);
+                    found_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+
+            // 发送最终进度
+            let elapsed = start_time.elapsed().as_secs();
+            let progress = SearchProgress {
+                scanned_count: cache_manager.file_count(),
+                found_count: found_count.load(Ordering::SeqCst),
+                current_path: String::new(),
+                elapsed_time: elapsed,
+                estimated_remaining: 0,
+            };
+            let _ = progress_tx.send(progress);
+
+            return;
+        }
+
+        // 缓存无效，需要重建索引
         // 发送初始进度
         let _ = progress_tx.send(SearchProgress {
             scanned_count: 0,
@@ -412,6 +585,56 @@ impl FileScanner {
             estimated_remaining: 0,
         };
         let _ = progress_tx.send(progress);
+
+        // 索引构建完成后启动增量更新服务
+        Self::start_incremental_service_if_needed(&config.search_paths);
+    }
+
+    /// 启动增量更新服务（如果尚未启动）
+    #[cfg(windows)]
+    fn start_incremental_service_if_needed(search_paths: &[String]) {
+        // 获取需要监控的卷列表
+        let volumes: Vec<String> = search_paths.iter()
+            .filter_map(|p| {
+                let path = Path::new(p);
+                if let Some(root) = path.components().next() {
+                    if let Some(drive) = root.as_os_str().to_str() {
+                        if drive.len() >= 2 && drive.chars().nth(1) == Some(':') {
+                            return Some(format!("{}:\\", drive.chars().next().unwrap()));
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+
+        if volumes.is_empty() {
+            log::debug!("没有可用的卷来启动增量更新服务");
+            return;
+        }
+
+        log::info!("启动增量更新服务，卷: {:?}", volumes);
+
+        // 尝试启动服务，如果已经启动会返回错误但不影响运行
+        match usn_monitor::start_incremental_service(volumes.clone()) {
+            Ok(statuses) => {
+                for status in statuses {
+                    if status.is_running {
+                        log::info!("增量更新服务已在卷 {} 上运行", status.volume);
+                    } else if let Some(err) = status.error_message {
+                        log::warn!("卷 {} 增量更新服务启动失败: {}", status.volume, err);
+                    }
+                }
+            }
+            Err(e) => {
+                log::debug!("增量更新服务启动: {}", e);
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn start_incremental_service_if_needed(_search_paths: &[String]) {
+        // 非 Windows 平台不做任何操作
     }
 
     /// 非 Windows 平台回退到 WalkDir
@@ -427,61 +650,73 @@ impl FileScanner {
         Self::search_worker_walkdir(config, query, result_tx, progress_tx, is_cancelled);
     }
 
-    /// 获取或构建 MFT 索引
+    /// 获取或构建 MFT 索引（使用新的缓存系统）
     #[cfg(windows)]
     fn get_or_build_mft_index(search_paths: &[String]) -> Vec<MftEntry> {
-        // 检查缓存是否有效（5分钟内有效）
-        {
-            let index_guard = MFT_INDEX.lock().unwrap();
-            if let Some(ref index) = *index_guard {
-                if index.last_update.elapsed().as_secs() < 300 {
-                    return index.entries.clone();
-                }
+        let cache_manager = get_cache_manager();
+
+        // 首先尝试加载缓存（如果还没有加载）
+        if !cache_manager.is_valid() {
+            log::info!("缓存无效，尝试加载缓存文件...");
+            if !cache_manager.load_cache() {
+                log::info!("缓存加载失败，需要构建新索引");
             }
         }
 
-        // 使用真正的 NTFS MFT/USN Journal 读取
-        let mut entries = Vec::new();
+        // 检查管理员权限
+        if !is_running_as_admin() {
+            log::warn!("没有管理员权限，无法使用 MFT 快速搜索，回退到 WalkDir");
+            return Vec::new();
+        }
 
-        for search_path in search_paths {
-            // 获取卷根路径（例如 D:\）
-            let volume_root = Self::get_volume_root(search_path);
+        // 获取需要建立索引的卷列表（排除已索引的卷）
+        let volumes_to_index = cache_manager.get_volumes_to_index(search_paths);
 
-            if !volume_root.is_empty() && mft_reader::is_ntfs_volume(&volume_root) {
-                log::info!("正在使用 NTFS MFT 扫描卷: {}", volume_root);
+        // 如果所有卷都已索引，缓存有效，直接返回空
+        if cache_manager.is_valid() && volumes_to_index.is_empty() {
+            log::info!("所有卷已索引，使用已有缓存，共 {} 个文件", cache_manager.file_count());
+            return Vec::new();
+        }
 
-                // 使用真正的 MFT 读取
-                let mft_entries = mft_reader::scan_volume_files(&volume_root);
+        // 增量添加新发现的卷
+        let mut has_new_volume = false;
 
-                for mft_entry in mft_entries {
-                    // 过滤出在搜索路径下的文件
-                    if mft_entry.path.starts_with(search_path) || search_path.len() <= 3 {
-                        entries.push(MftEntry {
-                            name: mft_entry.name,
-                            path: mft_entry.path,
-                            size: mft_entry.size,
-                            modified_time: mft_entry.modified_time,
-                            is_directory: mft_entry.is_directory,
-                        });
-                    }
+        for volume_root in &volumes_to_index {
+            log::info!("检测到新卷 {}，正在建立索引...", volume_root);
+
+            // 检查 NTFS
+            let is_ntfs = mft_reader::is_ntfs_volume(volume_root);
+
+            if is_ntfs {
+                // 使用 MFT 读取
+                let mft_entries = mft_reader::scan_volume_files(volume_root);
+
+                if !mft_entries.is_empty() {
+                    // 增量添加新卷的索引
+                    cache_manager.add_volume_from_mft(mft_entries.clone(), volume_root);
+                    has_new_volume = true;
+                    log::info!("卷 {} 索引构建完成，共 {} 个文件", volume_root, mft_entries.len());
+                } else {
+                    log::warn!("卷 {} MFT 读取失败", volume_root);
                 }
             } else {
-                // 非 NTFS 卷或无法识别，使用 WalkDir 回退
-                log::info!("卷 {} 不是 NTFS 或无法识别，使用 WalkDir", volume_root);
-                Self::build_index_walkdir(search_path, &mut entries);
+                log::info!("卷 {} 不是 NTFS，跳过", volume_root);
             }
         }
 
-        // 更新缓存
-        {
-            let mut index_guard = MFT_INDEX.lock().unwrap();
-            *index_guard = Some(MftIndex {
-                entries: entries.clone(),
-                last_update: std::time::Instant::now(),
-            });
+        // 检查缓存是否有效
+        if cache_manager.is_valid() {
+            log::info!("索引已更新，使用缓存搜索，当前共 {} 个文件", cache_manager.file_count());
+            return Vec::new();
         }
 
-        log::info!("MFT 索引构建完成，共 {} 个文件", entries.len());
+        // 缓存仍然无效，需要回退到 WalkDir
+        let mut entries = Vec::new();
+        for search_path in search_paths {
+            Self::build_index_walkdir(search_path, &mut entries);
+        }
+
+        log::info!("WalkDir 索引构建完成，共 {} 个文件", entries.len());
         entries
     }
 

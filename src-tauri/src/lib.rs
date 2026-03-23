@@ -3,11 +3,11 @@ mod models;
 mod services;
 
 use commands::{
-    cancel_search, clear_search_history, copy_path, delete_file, delete_files, get_current_results, get_search_config,
-    get_search_history, get_window_config, open_file, reveal_in_explorer, save_search_config,
+    cancel_search, clear_search_history, copy_path, delete_file, delete_files, get_current_results, get_recent_usn,
+    get_search_config, get_search_history, get_window_config, open_file, refresh_index, reveal_in_explorer, save_search_config,
     save_window_config, search_files, SearchState,
 };
-use services::ConfigStore;
+use services::{init_cache, start_incremental_service, stop_incremental_service, save_usn_state, ConfigStore};
 use tauri::LogicalSize;
 use tauri::Manager;
 
@@ -19,8 +19,10 @@ fn is_window_position_valid(x: i32, y: i32) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 初始化日志
-    env_logger::init();
+    // 初始化日志（强制设置为 info 级别）
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_secs()
+        .init();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -28,10 +30,49 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(SearchState::default())
         .manage(ConfigStore::new())
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                log::info!("窗口关闭，保存数据");
+
+                // 停止增量服务（这会停止后台线程并保存 USN 状态）
+                services::stop_incremental_service();
+
+                // 等待一小段时间让后台线程完成保存
+                std::thread::sleep(std::time::Duration::from_millis(500));
+
+                // 同步保存索引缓存
+                let cache_manager = services::get_cache_manager();
+                cache_manager.flush();
+                log::info!("索引缓存已保存");
+            }
+        })
         .setup(|app| {
+            // 初始化索引缓存（加载已有缓存或准备重建）
+            init_cache();
+
             // 读取窗口配置并恢复窗口大小
             let config_store = app.state::<ConfigStore>();
             let window_config = config_store.get_window_config();
+
+            // 获取搜索路径并启动增量更新服务
+            let search_config = config_store.load_config().search_config;
+            if !search_config.search_paths.is_empty() && cfg!(windows) {
+                // 获取需要监控的卷
+                let volumes: Vec<String> = search_config.search_paths
+                    .iter()
+                    .filter_map(|p| {
+                        let path = std::path::Path::new(p);
+                        path.components().next().and_then(|c| {
+                            c.as_os_str().to_str().map(|s| format!("{}\\", s))
+                        })
+                    })
+                    .collect();
+
+                if !volumes.is_empty() {
+                    log::info!("启动增量更新服务，监控卷: {:?}", volumes);
+                    start_incremental_service(volumes);
+                }
+            }
 
             if let Some(window) = app.get_webview_window("main") {
                 // 如果保存了最大化状态，恢复最大化
@@ -77,6 +118,8 @@ pub fn run() {
             delete_files,
             save_window_config,
             get_window_config,
+            get_recent_usn,
+            refresh_index,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

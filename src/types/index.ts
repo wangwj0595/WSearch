@@ -75,3 +75,13 @@ export const defaultWindowConfig: WindowConfig = {
   y: 0,
   is_maximized: false,
 };
+
+// USN 记录（调试用）
+export interface UsnRecord {
+  usn: number;
+  file_name: string;
+  full_path: string;
+  reason: number;
+  reason_text: string;
+  timestamp: string;
+}

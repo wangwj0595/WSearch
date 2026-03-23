@@ -2,9 +2,9 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ConfigProvider, message, Table, Button, Input, InputNumber, Space, Checkbox, List, Typography, Tooltip, Progress, theme, Collapse } from "antd";
-import { FolderOpenOutlined, FolderOutlined, FileTextOutlined, HistoryOutlined, SettingOutlined, DeleteOutlined } from "@ant-design/icons";
-import type { SearchResult, SearchConfig, SearchHistory, SearchProgress, SearchCompletedEvent } from "./types";
+import { ConfigProvider, message, Table, Button, Input, InputNumber, Space, Checkbox, List, Typography, Tooltip, Progress, theme, Collapse, Dropdown } from "antd";
+import { FolderOpenOutlined, FolderOutlined, FileTextOutlined, HistoryOutlined, SettingOutlined, DeleteOutlined, MoreOutlined, SyncOutlined, BugOutlined } from "@ant-design/icons";
+import type { SearchResult, SearchConfig, SearchHistory, SearchProgress, SearchCompletedEvent, UsnRecord } from "./types";
 import type { RowSelectMethod } from "antd/es/table/interface";
 import { defaultSearchConfig } from "./types";
 import { useWindowSize } from "./hooks/useWindowSize";
@@ -33,6 +33,16 @@ function AppContent() {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [lastSelectedRow, setLastSelectedRow] = useState<number | null>(null);
   const [activePanels, setActivePanels] = useState<string[]>(['search', 'exclude', 'options', 'history']);
+
+  // USN 调试相关状态
+  const [usnVolume, setUsnVolume] = useState<string>("D:");
+  const [usnCount, setUsnCount] = useState<number>(10);
+  const [usnRecords, setUsnRecords] = useState<UsnRecord[]>([]);
+  const [usnLoading, setUsnLoading] = useState(false);
+  const [showDebugPanel, setShowDebugPanel] = useState(false);
+
+  // 索引刷新相关状态
+  const [refreshLoading, setRefreshLoading] = useState(false);
 
   // 从配置加载折叠面板状态
   useEffect(() => {
@@ -156,6 +166,13 @@ function AppContent() {
       const savedConfig = await invoke<SearchConfig>("get_search_config");
       if (savedConfig) {
         setConfig(savedConfig);
+        // 同步折叠面板状态
+        const allPanels = ['search', 'exclude', 'options', 'history'];
+        if (savedConfig.collapsed_panels && savedConfig.collapsed_panels.length > 0) {
+          setActivePanels(allPanels.filter(p => !savedConfig.collapsed_panels!.includes(p)));
+        } else {
+          setActivePanels(allPanels);
+        }
       }
     } catch (e) {
       console.error("加载配置失败:", e);
@@ -345,6 +362,65 @@ function AppContent() {
   const handlePaginationChange = (page: number, size: number) => {
     setCurrentPage(page);
     setPageSize(size);
+  };
+
+  // 获取最近 USN 记录（调试用）
+  const handleGetRecentUsn = async () => {
+    if (!usnVolume.trim()) {
+      message.warning("请输入盘符");
+      return;
+    }
+
+    setUsnLoading(true);
+    try {
+      const records = await invoke<UsnRecord[]>("get_recent_usn", {
+        volume: usnVolume,
+        count: usnCount,
+      });
+      setUsnRecords(records);
+      message.success(`获取到 ${records.length} 条 USN 记录`);
+    } catch (e) {
+      message.error(`获取失败: ${e}`);
+    } finally {
+      setUsnLoading(false);
+    }
+  };
+
+  // 更新索引
+  const handleRefreshIndex = async () => {
+    if (config.search_paths.length === 0) {
+      message.warning("请先添加搜索目录");
+      return;
+    }
+
+    setRefreshLoading(true);
+    try {
+      // 从搜索路径中提取卷
+      const volumes = config.search_paths
+        .map(p => {
+          const path = p.replace(/\\/g, '/');
+          const match = path.match(/^([A-Za-z]):/);
+          return match ? `${match[1]}:\\` : null;
+        })
+        .filter((v): v is string => v !== null);
+
+      if (volumes.length === 0) {
+        message.warning("无法识别卷");
+        return;
+      }
+
+      // 去重
+      const uniqueVolumes = [...new Set(volumes)];
+
+      for (const volume of uniqueVolumes) {
+        const result = await invoke<string>("refresh_index", { volume });
+        message.success(result);
+      }
+    } catch (e) {
+      message.error(`更新索引失败: ${e}`);
+    } finally {
+      setRefreshLoading(false);
+    }
   };
 
   // 表格列定义
@@ -646,6 +722,7 @@ function AppContent() {
               />
             )}
           </Collapse.Panel>
+
         </Collapse>
       </div>
 
@@ -679,10 +756,88 @@ function AppContent() {
                 }
               }}
             >
-              {loading ? "取消" : "搜索"}
+            {loading ? "取消" : "搜索"}
             </Button>
           </Space.Compact>
+          <Dropdown
+            menu={{
+              items: [
+                {
+                  key: 'refresh',
+                  icon: <SyncOutlined spin={refreshLoading} />,
+                  label: '更新索引',
+                  onClick: handleRefreshIndex,
+                  disabled: refreshLoading,
+                },
+                {
+                  key: 'debug',
+                  icon: <BugOutlined />,
+                  label: 'USN 调试',
+                  onClick: () => setShowDebugPanel(!showDebugPanel),
+                },
+              ],
+            }}
+            trigger={['click']}
+          >
+            <Button
+              type="text"
+              size="large"
+              icon={<MoreOutlined />}
+              style={{ marginLeft: 8 }}
+              title="更多"
+            />
+          </Dropdown>
         </div>
+
+        {/* USN 调试面板 */}
+        {showDebugPanel && (
+          <div style={{ padding: '12px 16px', borderBottom: '1px solid #f0f0f0', background: '#fafafa' }}>
+            <Space wrap>
+              <Text strong>USN 调试:</Text>
+              <Input
+                placeholder="盘符，如 D:"
+                value={usnVolume}
+                onChange={(e) => setUsnVolume(e.target.value)}
+                style={{ width: 100 }}
+                size="small"
+              />
+              <InputNumber
+                placeholder="数量"
+                value={usnCount}
+                onChange={(value) => setUsnCount(value || 10)}
+                min={1}
+                max={100}
+                style={{ width: 80 }}
+                size="small"
+              />
+              <Button
+                size="small"
+                type="primary"
+                onClick={handleGetRecentUsn}
+                loading={usnLoading}
+              >
+                获取 USN
+              </Button>
+            </Space>
+            {usnRecords.length > 0 && (
+              <div style={{ marginTop: 12, maxHeight: 300, overflow: 'auto' }}>
+                <Table
+                  size="small"
+                  dataSource={usnRecords}
+                  rowKey="usn"
+                  columns={[
+                    { title: 'USN', dataIndex: 'usn', key: 'usn', width: 120 },
+                    { title: '文件名', dataIndex: 'file_name', key: 'file_name', ellipsis: true },
+                    { title: '原因', dataIndex: 'reason_text', key: 'reason_text', width: 180 },
+                    { title: '时间', dataIndex: 'timestamp', key: 'timestamp', width: 180 },
+                  ]}
+                  pagination={false}
+                  scroll={{ y: 200 }}
+                />
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="results-container" ref={containerRef}>
           {loading && searchProgress && searchProgress.scanned_count > 0 && (
@@ -788,6 +943,7 @@ function AppContent() {
           )}
         </div>
       </div>
+
     </div>
   );
 }
