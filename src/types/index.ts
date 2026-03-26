@@ -8,6 +8,15 @@ export interface SearchResult {
   match_content?: string;
 }
 
+// 搜索预设
+export interface SearchPreset {
+  id: string;
+  name: string;
+  search_paths: string[];
+  created_at: number;
+  use_count: number;
+}
+
 // 搜索配置
 export interface SearchConfig {
   search_paths: string[];
@@ -18,8 +27,12 @@ export interface SearchConfig {
   search_directories: boolean;
   use_mft: boolean;
   max_results: number;
+  min_size: number;
+  max_size: number;
   sidebar_width: number;
   collapsed_panels: string[];
+  presets: SearchPreset[];
+  active_preset_id: string | null;
 }
 
 // 搜索历史
@@ -63,8 +76,12 @@ export const defaultSearchConfig: SearchConfig = {
   search_directories: true,
   use_mft: false,
   max_results: 3000,
+  min_size: 0,
+  max_size: 0,
   sidebar_width: 280,
   collapsed_panels: [],
+  presets: [],
+  active_preset_id: null,
 };
 
 // 默认窗口配置

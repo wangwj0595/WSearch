@@ -38,6 +38,8 @@ pub async fn search_files(
     search_directories: bool,
     use_mft: bool,
     max_results: usize,
+    min_size: u64,
+    max_size: u64,
     app_handle: AppHandle,
     search_state: State<'_, SearchState>,
 ) -> Result<(), String> {
@@ -66,18 +68,18 @@ pub async fn search_files(
     // 发送搜索开始事件
     let _ = app_handle.emit("search_started", ());
 
-    let config = SearchConfig {
-        search_paths,
-        exclude_paths,
-        file_types,
-        search_content,
-        case_sensitive,
-        search_directories,
-        use_mft,
-        max_results,
-        sidebar_width: 280,
-        collapsed_panels: Vec::new(),
-    };
+    // 使用默认配置（presets 和 active_preset_id 不影响搜索）
+    let mut config = SearchConfig::default();
+    config.search_paths = search_paths;
+    config.exclude_paths = exclude_paths;
+    config.file_types = file_types;
+    config.search_content = search_content;
+    config.case_sensitive = case_sensitive;
+    config.search_directories = search_directories;
+    config.use_mft = use_mft;
+    config.max_results = max_results;
+    config.min_size = min_size;
+    config.max_size = max_size;
 
     let scanner = FileScanner::new(config);
     let start_time = Instant::now();

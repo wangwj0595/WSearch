@@ -2,9 +2,9 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ConfigProvider, message, Table, Button, Input, InputNumber, Space, Checkbox, List, Typography, Tooltip, Progress, theme, Collapse, Dropdown } from "antd";
-import { FolderOpenOutlined, FolderOutlined, FileTextOutlined, HistoryOutlined, SettingOutlined, DeleteOutlined, MoreOutlined, SyncOutlined, BugOutlined } from "@ant-design/icons";
-import type { SearchResult, SearchConfig, SearchHistory, SearchProgress, SearchCompletedEvent, UsnRecord } from "./types";
+import { ConfigProvider, message, Table, Button, Input, InputNumber, Space, Checkbox, List, Typography, Tooltip, Progress, theme, Collapse, Dropdown, Select, Modal, Popconfirm } from "antd";
+import { FolderOpenOutlined, FolderOutlined, FileTextOutlined, HistoryOutlined, SettingOutlined, DeleteOutlined, MoreOutlined, SyncOutlined, BugOutlined, SaveOutlined, EditOutlined } from "@ant-design/icons";
+import type { SearchResult, SearchConfig, SearchHistory, SearchProgress, SearchCompletedEvent, UsnRecord, SearchPreset } from "./types";
 import type { RowSelectMethod } from "antd/es/table/interface";
 import { defaultSearchConfig } from "./types";
 import { useWindowSize } from "./hooks/useWindowSize";
@@ -44,8 +44,34 @@ function AppContent() {
   // 索引刷新相关状态
   const [refreshLoading, setRefreshLoading] = useState(false);
 
+  // 文件大小筛选状态
+  const [minSizeValue, setMinSizeValue] = useState<number | null>(null);
+  const [minSizeUnit, setMinSizeUnit] = useState<'KB' | 'MB' | 'GB'>('KB');
+  const [maxSizeValue, setMaxSizeValue] = useState<number | null>(null);
+  const [maxSizeUnit, setMaxSizeUnit] = useState<'KB' | 'MB' | 'GB'>('KB');
+
+  // 预设相关状态
+  const [presetModalVisible, setPresetModalVisible] = useState(false);
+  const [savePresetModalVisible, setSavePresetModalVisible] = useState(false);
+  const [presetName, setPresetName] = useState('');
+  const [editingPreset, setEditingPreset] = useState<SearchPreset | null>(null);
+
+  // 文件名编辑相关状态
+  const [editingFilePath, setEditingFilePath] = useState<string | null>(null);
+  const [editingFileName, setEditingFileName] = useState<string>("");
+
+  // 标记是否正在处理折叠面板变化（防止 useEffect 覆盖用户操作）
+  // 使用 ref 来避免闭包问题
+  const isUpdatingPanelsRef = useRef(false);
+
   // 从配置加载折叠面板状态
   useEffect(() => {
+    // 如果正在处理用户操作，不覆盖
+    if (isUpdatingPanelsRef.current) {
+      isUpdatingPanelsRef.current = false;
+      return;
+    }
+
     if (config.collapsed_panels && config.collapsed_panels.length > 0) {
       // 收起的面板不显示在 activePanels 中
       const allPanels = ['search', 'exclude', 'options', 'history'];
@@ -55,12 +81,22 @@ function AppContent() {
 
   // 保存折叠面板状态
   const saveCollapsedPanels = useCallback((expandedPanels: string[]) => {
+    // 标记正在处理用户操作，防止 useEffect 覆盖
+    isUpdatingPanelsRef.current = true;
+
+    // 立即更新 UI 状态，不等待后端响应
+    setActivePanels(expandedPanels);
+
     const allPanels = ['search', 'exclude', 'options', 'history'];
     const collapsedPanels = allPanels.filter(p => !expandedPanels.includes(p));
-    const newConfig = { ...config, collapsed_panels: collapsedPanels };
-    setConfig(newConfig);
-    invoke("save_search_config", { config: newConfig });
-  }, [config]);
+    // 直接使用传入的 expandedPanels 计算，避免依赖可能过期的 config 状态
+    setConfig(prevConfig => {
+      const newConfig = { ...prevConfig, collapsed_panels: collapsedPanels };
+      // 在状态更新后异步保存
+      invoke("save_search_config", { config: newConfig });
+      return newConfig;
+    });
+  }, []);
 
   // 加载配置和历史
   useEffect(() => {
@@ -261,13 +297,15 @@ function AppContent() {
         searchDirectories: config.search_directories,
         useMft: config.use_mft,
         maxResults: config.max_results,
+        minSize: convertToBytes(minSizeValue, minSizeUnit),
+        maxSize: convertToBytes(maxSizeValue, maxSizeUnit),
       });
       // 搜索历史会在 search_completed 事件中刷新
     } catch (e) {
       message.error(`搜索失败: ${e}`);
       setLoading(false);
     }
-  }, [config]);
+  }, [config, minSizeValue, minSizeUnit, maxSizeValue, maxSizeUnit]);
 
   // 打开文件
   const handleOpenFile = async (path: string) => {
@@ -285,6 +323,61 @@ function AppContent() {
     } catch (e) {
       message.error(`显示失败: ${e}`);
     }
+  };
+
+  // 重命名文件
+  const handleRenameFile = async (oldPath: string, newName: string) => {
+    // 获取原文件名
+    const pathParts = oldPath.replace(/\\/g, '/').split('/');
+    const oldName = pathParts[pathParts.length - 1];
+
+    // 如果文件名没有变化，不调用后端
+    if (newName.trim() === oldName) {
+      setEditingFilePath(null);
+      setEditingFileName("");
+      return;
+    }
+
+    try {
+      const result = await invoke<string>("rename_file", {
+        oldPath,
+        newName: newName.trim()
+      });
+      message.success(result);
+
+      // 更新本地状态
+      setResults(prev => prev.map(item => {
+        if (item.path === oldPath) {
+          // 计算新路径
+          const oldPathObj = oldPath.replace(/\\/g, '/');
+          const lastSlash = oldPathObj.lastIndexOf('/');
+          const newPath = oldPath.substring(0, lastSlash + 1) + newName.trim();
+          return {
+            ...item,
+            name: newName.trim(),
+            path: newPath
+          };
+        }
+        return item;
+      }));
+    } catch (e) {
+      message.error(`重命名失败: ${e}`);
+    } finally {
+      setEditingFilePath(null);
+      setEditingFileName("");
+    }
+  };
+
+  // 开始编辑文件名
+  const startEditFileName = (path: string, name: string) => {
+    setEditingFilePath(path);
+    setEditingFileName(name);
+  };
+
+  // 取消编辑文件名
+  const cancelEditFileName = () => {
+    setEditingFilePath(null);
+    setEditingFileName("");
   };
 
   // 删除单个文件
@@ -345,6 +438,42 @@ function AppContent() {
     } catch (e) {
       message.error(`清除失败: ${e}`);
     }
+  };
+
+  // 转换大小值为字节
+  const convertToBytes = (value: number | null, unit: 'KB' | 'MB' | 'GB'): number => {
+    if (value === null || value === undefined || value === 0) return 0;
+    switch (unit) {
+      case 'KB': return value * 1024;
+      case 'MB': return value * 1024 * 1024;
+      case 'GB': return value * 1024 * 1024 * 1024;
+      default: return value;
+    }
+  };
+
+  // 快速选择大小
+  const handleQuickSize = (size: number, unit: 'KB' | 'MB' | 'GB') => {
+    setMinSizeValue(size);
+    setMinSizeUnit(unit);
+  };
+
+  // 格式化显示范围
+  const formatSizeRange = (): string => {
+    const minBytes = convertToBytes(minSizeValue, minSizeUnit);
+    const maxBytes = convertToBytes(maxSizeValue, maxSizeUnit);
+
+    const formatBytes = (bytes: number): string => {
+      if (bytes === 0) return '0';
+      if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+      if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+      if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${bytes} B`;
+    };
+
+    const minStr = minBytes > 0 ? formatBytes(minBytes) : '0';
+    const maxStr = maxBytes > 0 ? formatBytes(maxBytes) : '无限制';
+
+    return `${minStr} ~ ${maxStr}`;
   };
 
   // 取消搜索
@@ -423,6 +552,154 @@ function AppContent() {
     }
   };
 
+  // 生成预设签名（用于去重）
+  const getPresetSignature = (paths: string[]): string => {
+    return paths.join('|');
+  };
+
+  // 检查是否存在相同目录配置的预设
+  const isDuplicatePreset = (paths: string[], excludeId?: string): boolean => {
+    const signature = getPresetSignature(paths);
+    return config.presets.some(p =>
+      p.id !== excludeId && getPresetSignature(p.search_paths) === signature
+    );
+  };
+
+  // 保存为新预设
+  const handleSavePreset = async () => {
+    if (!presetName.trim()) {
+      message.warning("请输入预设名称");
+      return;
+    }
+
+    if (config.search_paths.length === 0) {
+      message.warning("请先添加搜索目录");
+      return;
+    }
+
+    // 检查同名预设
+    if (config.presets.some(p => p.name === presetName.trim())) {
+      message.warning("已存在同名预设，请使用其他名称");
+      return;
+    }
+
+    // 检查目录组合是否重复
+    if (isDuplicatePreset(config.search_paths)) {
+      message.warning("已存在相同目录配置的预设");
+      return;
+    }
+
+    const newPreset: SearchPreset = {
+      id: crypto.randomUUID(),
+      name: presetName.trim(),
+      search_paths: [...config.search_paths],
+      created_at: Date.now(),
+      use_count: 0,
+    };
+
+    const newPresets = [...config.presets, newPreset];
+    const newConfig = {
+      ...config,
+      presets: newPresets,
+      active_preset_id: newPreset.id,
+    };
+
+    setConfig(newConfig);
+    await invoke("save_search_config", { config: newConfig });
+    message.success(`预设 "${presetName}" 保存成功`);
+    setSavePresetModalVisible(false);
+    setPresetName('');
+  };
+
+  // 应用预设
+  const handleApplyPreset = async (preset: SearchPreset) => {
+    // 更新使用次数
+    const updatedPresets = config.presets.map(p =>
+      p.id === preset.id ? { ...p, use_count: p.use_count + 1 } : p
+    );
+
+    const newConfig = {
+      ...config,
+      search_paths: [...preset.search_paths],
+      presets: updatedPresets,
+      active_preset_id: preset.id,
+    };
+
+    setConfig(newConfig);
+    await invoke("save_search_config", { config: newConfig });
+    message.success(`已切换到预设 "${preset.name}"`);
+  };
+
+  // 删除预设
+  const handleDeletePreset = async (presetId: string) => {
+    const newPresets = config.presets.filter(p => p.id !== presetId);
+    const newActiveId = config.active_preset_id === presetId ? null : config.active_preset_id;
+
+    const newConfig = {
+      ...config,
+      presets: newPresets,
+      active_preset_id: newActiveId,
+    };
+
+    setConfig(newConfig);
+    await invoke("save_search_config", { config: newConfig });
+    message.success("预设已删除");
+  };
+
+  // 重命名预设
+  const handleRenamePreset = async (presetId: string, newName: string) => {
+    if (!newName.trim()) {
+      message.warning("预设名称不能为空");
+      return;
+    }
+
+    // 检查同名预设
+    if (config.presets.some(p => p.id !== presetId && p.name === newName.trim())) {
+      message.warning("已存在同名预设");
+      return;
+    }
+
+    const newPresets = config.presets.map(p =>
+      p.id === presetId ? { ...p, name: newName.trim() } : p
+    );
+
+    const newConfig = {
+      ...config,
+      presets: newPresets,
+    };
+
+    setConfig(newConfig);
+    await invoke("save_search_config", { config: newConfig });
+    message.success("预设已重命名");
+    setEditingPreset(null);
+  };
+
+  // 创建空白预设
+  const handleCreateEmptyPreset = async () => {
+    const newPreset: SearchPreset = {
+      id: crypto.randomUUID(),
+      name: `预设 ${config.presets.length + 1}`,
+      search_paths: [],
+      created_at: Date.now(),
+      use_count: 0,
+    };
+
+    const newPresets = [...config.presets, newPreset];
+    const newConfig = {
+      ...config,
+      presets: newPresets,
+      active_preset_id: newPreset.id,
+    };
+
+    setConfig(newConfig);
+    await invoke("save_search_config", { config: newConfig });
+    setPresetModalVisible(false);
+    message.success("空白预设已创建");
+  };
+
+  // 获取当前激活的预设
+  const activePreset = config.presets.find(p => p.id === config.active_preset_id);
+
   // 表格列定义
   const columns = [
     {
@@ -433,7 +710,29 @@ function AppContent() {
       render: (name: string, record: SearchResult) => (
         <Space>
           <span>{record.is_directory ? "📁" : "📄"}</span>
-          <a onClick={() => handleOpenFile(record.path)}>{name}</a>
+          {editingFilePath === record.path ? (
+            <Input
+              size="small"
+              value={editingFileName}
+              onChange={(e) => setEditingFileName(e.target.value)}
+              onPressEnter={() => handleRenameFile(record.path, editingFileName)}
+              onBlur={() => handleRenameFile(record.path, editingFileName)}
+              autoFocus
+              style={{ width: 150 }}
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : (
+            <a
+              onClick={(e) => {
+                e.stopPropagation();
+                startEditFileName(record.path, name);
+              }}
+              title="点击修改文件名"
+              style={{ cursor: 'pointer' }}
+            >
+              {name}
+            </a>
+          )}
         </Space>
       ),
     },
@@ -517,6 +816,45 @@ function AppContent() {
               </div>
             }
           >
+            {/* 预设选择和操作按钮 */}
+            <div style={{ marginBottom: 8, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Select
+                size="small"
+                style={{ width: 140 }}
+                placeholder="选择预设"
+                value={config.active_preset_id}
+                onChange={(value) => {
+                  const preset = config.presets.find(p => p.id === value);
+                  if (preset) handleApplyPreset(preset);
+                }}
+                options={config.presets.map(p => ({
+                  value: p.id,
+                  label: `${p.name} (${p.use_count}次)`,
+                }))}
+                allowClear
+                onClear={() => {
+                  const newConfig = { ...config, active_preset_id: null };
+                  setConfig(newConfig);
+                  invoke("save_search_config", { config: newConfig });
+                }}
+              />
+              <Button
+                size="small"
+                icon={<SaveOutlined />}
+                onClick={() => setSavePresetModalVisible(true)}
+                disabled={config.search_paths.length === 0}
+              >
+                保存预设
+              </Button>
+              <Button
+                size="small"
+                icon={<SettingOutlined />}
+                onClick={() => setPresetModalVisible(true)}
+              >
+                管理
+              </Button>
+            </div>
+
             {config.search_paths.length === 0 ? (
               <Text type="secondary" style={{ fontSize: 12, display: 'block', textAlign: 'center', padding: '12px 0' }}>
                 点击上方 + 添加搜索目录
@@ -669,6 +1007,66 @@ function AppContent() {
                   style={{ width: 100 }}
                 />
               </div>
+              {/* 文件大小筛选 */}
+              <div style={{ marginTop: 8 }}>
+                <Text style={{ fontSize: 13 }}>文件大小:</Text>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                <InputNumber
+                  size="small"
+                  placeholder="最小"
+                  min={0}
+                  value={minSizeValue}
+                  onChange={(value) => setMinSizeValue(value)}
+                  style={{ width: 70 }}
+                />
+                <Select
+                  size="small"
+                  value={minSizeUnit}
+                  onChange={(value) => setMinSizeUnit(value)}
+                  style={{ width: 65 }}
+                  options={[
+                    { value: 'KB', label: 'KB' },
+                    { value: 'MB', label: 'MB' },
+                    { value: 'GB', label: 'GB' },
+                  ]}
+                />
+                <Text style={{ fontSize: 12 }}>~</Text>
+                <InputNumber
+                  size="small"
+                  placeholder="最大"
+                  min={0}
+                  value={maxSizeValue}
+                  onChange={(value) => setMaxSizeValue(value)}
+                  style={{ width: 70 }}
+                />
+                <Select
+                  size="small"
+                  value={maxSizeUnit}
+                  onChange={(value) => setMaxSizeUnit(value)}
+                  style={{ width: 65 }}
+                  options={[
+                    { value: 'KB', label: 'KB' },
+                    { value: 'MB', label: 'MB' },
+                    { value: 'GB', label: 'GB' },
+                  ]}
+                />
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <Space wrap size={[4, 4]}>
+                  <Button size="small" type="text" onClick={() => handleQuickSize(1, 'KB')}>1KB</Button>
+                  <Button size="small" type="text" onClick={() => handleQuickSize(1, 'MB')}>1MB</Button>
+                  <Button size="small" type="text" onClick={() => handleQuickSize(10, 'MB')}>10MB</Button>
+                  <Button size="small" type="text" onClick={() => handleQuickSize(100, 'MB')}>100MB</Button>
+                  <Button size="small" type="text" onClick={() => handleQuickSize(1, 'GB')}>1GB</Button>
+                  <Button size="small" type="text" onClick={() => handleQuickSize(10, 'GB')}>10GB</Button>
+                </Space>
+              </div>
+              {(minSizeValue || maxSizeValue) && (
+                <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                  范围: {formatSizeRange()}
+                </Text>
+              )}
             </Space>
           </Collapse.Panel>
 
@@ -944,6 +1342,107 @@ function AppContent() {
         </div>
       </div>
 
+      {/* 保存预设弹窗 */}
+      <Modal
+        title="保存为预设"
+        open={savePresetModalVisible}
+        onOk={handleSavePreset}
+        onCancel={() => {
+          setSavePresetModalVisible(false);
+          setPresetName('');
+        }}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Input
+          placeholder="请输入预设名称"
+          value={presetName}
+          onChange={(e) => setPresetName(e.target.value)}
+          onPressEnter={handleSavePreset}
+        />
+        {config.search_paths.length > 0 && (
+          <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
+            目录: {config.search_paths.join(', ')}
+          </Text>
+        )}
+      </Modal>
+
+      {/* 预设管理弹窗 */}
+      <Modal
+        title="预设管理"
+        open={presetModalVisible}
+        onCancel={() => setPresetModalVisible(false)}
+        footer={[
+          <Button key="create" icon={<FolderOutlined />} onClick={handleCreateEmptyPreset}>
+            新建空白预设
+          </Button>,
+          <Button key="close" type="primary" onClick={() => setPresetModalVisible(false)}>
+            关闭
+          </Button>,
+        ]}
+        width={500}
+      >
+        {config.presets.length === 0 ? (
+          <Text type="secondary" style={{ display: 'block', textAlign: 'center', padding: '24px 0' }}>
+            暂无预设，请创建或保存预设
+          </Text>
+        ) : (
+          <List
+            size="small"
+            dataSource={config.presets}
+            renderItem={(preset: SearchPreset) => (
+              <List.Item
+                actions={[
+                  editingPreset?.id === preset.id ? (
+                    <Space key="save">
+                      <Input
+                        size="small"
+                        defaultValue={preset.name}
+                        onPressEnter={(e) => handleRenamePreset(preset.id, (e.target as HTMLInputElement).value)}
+                        style={{ width: 100 }}
+                        autoFocus
+                        onBlur={(e) => handleRenamePreset(preset.id, e.target.value)}
+                      />
+                      <Button size="small" onClick={() => setEditingPreset(null)}>取消</Button>
+                    </Space>
+                  ) : (
+                    <Space key="actions">
+                      <Button
+                        size="small"
+                        type={config.active_preset_id === preset.id ? 'primary' : 'default'}
+                        onClick={() => handleApplyPreset(preset)}
+                      >
+                        {config.active_preset_id === preset.id ? '当前' : '应用'}
+                      </Button>
+                      <Button size="small" icon={<EditOutlined />} onClick={() => setEditingPreset(preset)} />
+                      <Popconfirm
+                        title="确定删除此预设吗？"
+                        onConfirm={() => handleDeletePreset(preset.id)}
+                        okText="确定"
+                        cancelText="取消"
+                      >
+                        <Button size="small" danger icon={<DeleteOutlined />} />
+                      </Popconfirm>
+                    </Space>
+                  ),
+                ]}
+              >
+                <div>
+                  <Text strong>{preset.name}</Text>
+                  <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                    使用{preset.use_count}次
+                  </Text>
+                  {preset.search_paths.length > 0 && (
+                    <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                      {preset.search_paths.join(', ')}
+                    </Text>
+                  )}
+                </div>
+              </List.Item>
+            )}
+          />
+        )}
+      </Modal>
     </div>
   );
 }

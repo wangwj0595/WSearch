@@ -125,6 +125,38 @@ pub fn delete_file(path: String) -> Result<String, String> {
     }
 }
 
+/// 重命名文件或目录
+#[tauri::command]
+pub fn rename_file(old_path: String, new_name: String) -> Result<String, String> {
+    let path_obj = std::path::Path::new(&old_path);
+
+    if !path_obj.exists() {
+        return Err("文件或目录不存在".to_string());
+    }
+
+    if new_name.trim().is_empty() {
+        return Err("新文件名不能为空".to_string());
+    }
+
+    // 获取父目录
+    let parent = path_obj.parent().ok_or("无法获取父目录")?;
+
+    // 构建新路径
+    let new_path = parent.join(&new_name);
+    let new_path_str = new_path.to_string_lossy().to_string();
+
+    // 检查新路径是否已存在
+    if new_path.exists() {
+        return Err("目标文件名已存在".to_string());
+    }
+
+    // 执行重命名
+    std::fs::rename(&old_path, &new_path).map_err(|e| format!("重命名失败: {}", e))?;
+
+    log::info!("重命名成功: {} -> {}", old_path, new_path_str);
+    Ok(format!("已重命名为: {}", new_name))
+}
+
 /// 批量删除文件或目录
 #[tauri::command]
 pub fn delete_files(paths: Vec<String>) -> Result<Vec<String>, String> {

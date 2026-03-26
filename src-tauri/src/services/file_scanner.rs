@@ -296,6 +296,22 @@ impl FileScanner {
                     is_match = false;
                 }
 
+                // 检查文件大小过滤
+                if is_match {
+                    let metadata = entry.metadata().ok();
+                    let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+
+                    // 大小范围过滤（目录不参与大小过滤）
+                    if !entry.file_type().is_dir() {
+                        if config.min_size > 0 && size < config.min_size {
+                            is_match = false;
+                        }
+                        if config.max_size > 0 && size > config.max_size {
+                            is_match = false;
+                        }
+                    }
+                }
+
                 if is_match {
                     let metadata = entry.metadata().ok();
                     let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -436,6 +452,16 @@ impl FileScanner {
                     continue;
                 }
 
+                // 检查文件大小过滤（目录不参与大小过滤）
+                if is_match && !entry.is_directory {
+                    if config.min_size > 0 && entry.size < config.min_size {
+                        is_match = false;
+                    }
+                    if config.max_size > 0 && entry.size > config.max_size {
+                        is_match = false;
+                    }
+                }
+
                 if is_match {
                     let result = SearchResult {
                         name: entry.name,
@@ -554,6 +580,16 @@ impl FileScanner {
             // 如果不搜索目录，则跳过目录
             if is_match && !config.search_directories && entry.is_directory {
                 continue;
+            }
+
+            // 检查文件大小过滤（目录不参与大小过滤）
+            if is_match && !entry.is_directory {
+                if config.min_size > 0 && entry.size < config.min_size {
+                    is_match = false;
+                }
+                if config.max_size > 0 && entry.size > config.max_size {
+                    is_match = false;
+                }
             }
 
             if is_match {

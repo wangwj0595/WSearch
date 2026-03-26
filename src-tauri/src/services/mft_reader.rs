@@ -53,7 +53,7 @@ pub struct MftFileEntry {
     pub name: String,
     pub path: String,
     pub size: u64,
-    pub modified_time: String,
+    pub modified_time: i64,
     pub is_directory: bool,
 }
 
@@ -110,11 +110,18 @@ pub fn scan_volume_files(volume_path: &str) -> Vec<MftFileEntry> {
         }
 
         count += 1;
+
+        // 获取修改时间（直接从 MFT 获取，无需文件系统调用）
+        // ntfs-reader 库从 MFT 解析的时间戳字段是 Option<OffsetDateTime>
+        let modified_time = info.modified
+            .map(|t| t.unix_timestamp())
+            .unwrap_or(0);
+
         entries.push(MftFileEntry {
-            name: info.name,
+            name: info.name.clone(),
             path: info.path.to_string_lossy().to_string(),
             size: info.size,
-            modified_time: String::new(),
+            modified_time,
             is_directory: info.is_directory,
         });
     });

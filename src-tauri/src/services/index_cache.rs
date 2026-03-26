@@ -67,21 +67,9 @@ impl IndexCache {
     pub fn from_mft_entries(mft_entries: Vec<MftFileEntry>, volume_root: &str) -> Self {
         let mut cache = Self::new();
 
-        // 解析修改时间
-        let parse_time = |time_str: &str| -> i64 {
-            // 尝试解析 "2024-01-01 12:00:00" 格式
-            if time_str.len() >= 19 {
-                let dt = &time_str[..19];
-                // 简化的解析，实际应该用 chrono 或 time crate
-                0
-            } else {
-                0
-            }
-        };
-
         for entry in mft_entries {
             let idx = cache.entries.len();
-            let modified = parse_time(&entry.modified_time);
+            let modified = entry.modified_time;
 
             // 添加到主列表
             cache.entries.push(IndexEntry {
@@ -433,7 +421,7 @@ impl CacheManager {
                 name: entry.name.clone(),
                 path: entry.path.clone(),
                 size: entry.size,
-                modified_time: 0,
+                modified_time: entry.modified_time,
                 is_directory: entry.is_directory,
             });
 
@@ -512,7 +500,7 @@ impl CacheManager {
                 name: e.name.clone(),
                 path: e.path.clone(),
                 size: e.size,
-                modified_time: String::new(),
+                modified_time: e.modified_time,
                 is_directory: e.is_directory,
             })
             .collect();
@@ -588,20 +576,10 @@ impl CacheManager {
 
         let mut index = self.index.write();
 
-        // 解析修改时间
-        let parse_time = |time_str: &str| -> i64 {
-            if time_str.len() >= 19 {
-                let _dt = &time_str[..19];
-                0
-            } else {
-                0
-            }
-        };
-
         // 添加新卷的条目到现有索引
         for entry in &mft_entries {
             let idx = index.entries.len();
-            let modified = parse_time(&entry.modified_time);
+            let modified = entry.modified_time;
 
             // 添加到主列表
             index.entries.push(IndexEntry {
@@ -705,6 +683,28 @@ impl CacheManager {
             }
         };
 
+        // 格式化时间戳为可读字符串
+        let format_time = |timestamp: i64| -> String {
+            if timestamp == 0 {
+                return String::new();
+            }
+
+            // 将 Unix 时间戳转换为可读格式
+            let secs = timestamp as i64;
+            let mins = secs / 60;
+            let hours = (mins % 1440) / 60;
+            let minutes = mins % 60;
+            let seconds = secs % 60;
+
+            let days = secs / 86400;
+            let year = 1970 + days / 365;
+            let day_of_year = days % 365;
+            let month = (day_of_year / 30) + 1;
+            let day = (day_of_year % 30) + 1;
+
+            format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", year, month, day, hours, minutes, seconds)
+        };
+
         results
             .into_iter()
             .take(max_results)
@@ -712,7 +712,7 @@ impl CacheManager {
                 name: e.name.clone(),
                 path: format_path(&e.path),
                 size: e.size,
-                modified_time: String::new(),
+                modified_time: format_time(e.modified_time),
                 is_directory: e.is_directory,
             })
             .collect()
@@ -793,7 +793,7 @@ impl CacheManager {
     }
 
     /// 添加单个文件到索引（用于 USN 增量更新）
-    pub fn add_file_entry(&self, name: String, path: String, size: u64, is_directory: bool) {
+    pub fn add_file_entry(&self, name: String, path: String, size: u64, is_directory: bool, modified_time: i64) {
         let mut index = self.index.write();
 
         // 检查文件是否已存在
@@ -810,7 +810,7 @@ impl CacheManager {
             name: name.clone(),
             path: path.clone(),
             size,
-            modified_time: 0,
+            modified_time,
             is_directory,
         });
 
@@ -848,8 +848,14 @@ impl CacheManager {
     pub fn remove_file_entry(&self, path: &str) {
         let mut index = self.index.write();
 
-        // 查找文件索引
-        let file_idx = index.entries.iter().position(|e| e.path == path);
+        // 标准化路径：去掉 \\.\ 前缀
+        let normalized_path = path.trim_start_matches("\\\\.\\");
+
+        // 查找文件索引（尝试两种路径格式）
+        let file_idx = index.entries.iter().position(|e| {
+            e.path == normalized_path || e.path == path ||
+            e.path.trim_start_matches("\\\\.\\") == normalized_path
+        });
 
         if let Some(idx) = file_idx {
             // 获取文件名用于删除前缀索引

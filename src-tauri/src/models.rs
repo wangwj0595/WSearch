@@ -11,6 +11,16 @@ pub struct SearchResult {
     pub match_content: Option<String>,
 }
 
+/// 搜索预设
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchPreset {
+    pub id: String,
+    pub name: String,
+    pub search_paths: Vec<String>,
+    pub created_at: u64,
+    pub use_count: u32,
+}
+
 /// 搜索配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
@@ -22,8 +32,12 @@ pub struct SearchConfig {
     pub search_directories: bool,
     pub use_mft: bool,
     pub max_results: usize,
+    pub min_size: u64,
+    pub max_size: u64,
     pub sidebar_width: u32,
     pub collapsed_panels: Vec<String>,
+    pub presets: Vec<SearchPreset>,
+    pub active_preset_id: Option<String>,
 }
 
 impl Default for SearchConfig {
@@ -43,8 +57,12 @@ impl Default for SearchConfig {
             search_directories: true,
             use_mft: false,
             max_results: 1000,
+            min_size: 0,
+            max_size: 0,
             sidebar_width: 280,
             collapsed_panels: Vec::new(),
+            presets: Vec::new(),
+            active_preset_id: None,
         }
     }
 }
@@ -95,9 +113,3 @@ pub struct AppConfig {
     pub window_config: WindowConfig,
 }
 
-/// 搜索预设
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchPreset {
-    pub name: String,
-    pub config: SearchConfig,
-}

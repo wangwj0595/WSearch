@@ -284,7 +284,7 @@ impl IncrementalUpdater {
         let mut max_usn: i64 = last_usn;
 
         // 每次最多处理 100 条记录，避免长时间阻塞
-        let max_records_per_batch = 500;
+        let max_records_per_batch = 300;
 
         // 统计本次处理的条目数
         let mut processed_count = 0;
@@ -346,13 +346,17 @@ impl IncrementalUpdater {
 
                                 // 根据原因更新缓存
                                 if (reason_mask & reason_file_create) != 0 || (reason_mask & reason_rename_new) != 0 {
+                                    // 获取文件的实际属性
+                                    let (file_size, is_dir, modified_time) = get_file_attributes(&path_str);
+
                                     cache_manager.add_file_entry(
                                         file_name_str.clone(),
                                         path_str.clone(),
-                                        0,
-                                        false,
+                                        file_size,
+                                        is_dir,
+                                        modified_time,
                                     );
-                                    log::debug!("添加文件到索引: {}", file_name_str);
+                                    log::debug!("添加文件到索引: {}, size: {}", file_name_str, file_size);
                                 }
 
                                 if (reason_mask & reason_file_delete) != 0 || (reason_mask & reason_rename_old) != 0 {
@@ -586,6 +590,7 @@ pub fn trigger_incremental_update() -> bool {
                         if has_new {
                             log::info!("卷 {} 有新记录", volume);
                             has_new_records = true;
+                            //to do 需要把增量服务调整为5秒检查检查一次
                         }
                     }
                     Err(e) => {
@@ -597,6 +602,11 @@ pub fn trigger_incremental_update() -> bool {
             log::warn!("增量更新未启用");
         }
     }
+
+    // 增量更新后立即保存 USN 状态，确保即使应用异常退出也能从最新位置恢复
+    // if let Err(e) = save_usn_state() {
+    //     log::warn!("保存 USN 状态失败: {}", e);
+    // }
 
     has_new_records
 }
@@ -650,6 +660,38 @@ fn is_temp_file(file_name: &str) -> bool {
     // }
 
     false
+}
+
+/// 获取文件的实际属性（大小、是否目录和修改时间）
+/// 返回 (file_size, is_directory, modified_time_unix)
+fn get_file_attributes(path: &str) -> (u64, bool, i64) {
+    // 处理路径格式：去掉 \\.\ 前缀
+    let normalized_path = path.trim_start_matches("\\\\.\\");
+
+    let file_path = Path::new(normalized_path);
+
+    match fs::metadata(file_path) {
+        Ok(metadata) => {
+            let size = metadata.len();
+            let is_dir = metadata.is_dir();
+
+            // 获取修改时间
+            let modified_time = metadata
+                .modified()
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+
+            (size, is_dir, modified_time)
+        }
+        Err(e) => {
+            log::warn!("获取文件属性失败: {}, 错误: {}", path, e);
+            (0, false, 0)
+        }
+    }
 }
 
 // ==================== 持久化保存功能 ====================
