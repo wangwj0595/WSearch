@@ -395,26 +395,31 @@ impl FileScanner {
 
         // 检查缓存是否有效
         if cache_manager.is_valid() {
-            // 缓存有效，先启动增量更新服务并触发一次增量更新
-            log::info!("缓存有效，启动增量更新并同步最新文件变化...");
-
-            // 发送初始进度
-            let _ = progress_tx.send(SearchProgress {
-                scanned_count: 0,
-                found_count: 0,
-                current_path: "正在同步文件变化...".to_string(),
-                elapsed_time: 0,
-                estimated_remaining: 0,
-            });
-
             // 启动增量更新服务（如果尚未启动）
             Self::start_incremental_service_if_needed(&config.search_paths);
 
-            // 手动触发一次增量更新，将新的文件变化同步到缓存
-            let _ = usn_monitor::trigger_incremental_update();
+            // 检查是否有新记录
+            if usn_monitor::has_new_records() {
+                // 有新记录：直接使用缓存搜索（已包含最新变化）
+                log::info!("检测到新记录，直接搜索");
+            } else {
+                // 没有新记录：触发一次增量更新，同步最新变化
+                log::info!("没有新记录，触发增量更新...");
 
-            // 同步完成后，使用缓存搜索
-            log::info!("文件变化同步完成，使用缓存索引搜索，文件数: {}", cache_manager.file_count());
+                // 发送初始进度
+                let _ = progress_tx.send(SearchProgress {
+                    scanned_count: 0,
+                    found_count: 0,
+                    current_path: "正在同步文件变化...".to_string(),
+                    elapsed_time: 0,
+                    estimated_remaining: 0,
+                });
+
+                // 手动触发一次增量更新
+                let _ = usn_monitor::trigger_incremental_update();
+
+                log::info!("增量更新完成，使用缓存索引搜索，文件数: {}", cache_manager.file_count());
+            }
 
             // 发送搜索进度
             let _ = progress_tx.send(SearchProgress {
@@ -629,6 +634,12 @@ impl FileScanner {
     /// 启动增量更新服务（如果尚未启动）
     #[cfg(windows)]
     fn start_incremental_service_if_needed(search_paths: &[String]) {
+        // 检查服务是否已经在运行，避免重复启动
+        if usn_monitor::is_incremental_service_running() {
+            log::debug!("增量更新服务已在运行，跳过启动");
+            return;
+        }
+
         // 获取需要监控的卷列表
         let volumes: Vec<String> = search_paths.iter()
             .filter_map(|p| {

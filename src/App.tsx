@@ -375,10 +375,10 @@ function AppContent() {
   };
 
   // 取消编辑文件名
-  const cancelEditFileName = () => {
-    setEditingFilePath(null);
-    setEditingFileName("");
-  };
+  // const cancelEditFileName = () => {
+  //   setEditingFilePath(null);
+  //   setEditingFileName("");
+  // };
 
   // 删除单个文件
   const handleDeleteFile = async (path: string) => {
@@ -698,7 +698,7 @@ function AppContent() {
   };
 
   // 获取当前激活的预设
-  const activePreset = config.presets.find(p => p.id === config.active_preset_id);
+  // const activePreset = config.presets.find(p => p.id === config.active_preset_id);
 
   // 表格列定义
   const columns = [

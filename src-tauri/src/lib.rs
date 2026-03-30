@@ -69,8 +69,16 @@ pub fn run() {
                     .collect();
 
                 if !volumes.is_empty() {
-                    log::info!("启动增量更新服务，监控卷: {:?}", volumes);
-                    start_incremental_service(volumes);
+                    // 检查是否有缓存，有缓存才启动增量更新服务
+                    let cache_manager = services::get_cache_manager();
+                    let has_any_cache = !cache_manager.get_indexed_volumes().is_empty();
+
+                    if has_any_cache {
+                        log::info!("有缓存存在，启动增量更新服务，监控卷: {:?}", volumes);
+                        let _ = start_incremental_service(volumes);
+                    } else {
+                        log::info!("没有缓存存在，跳过启动增量更新服务，等待用户手动触发索引重建");
+                    }
                 }
             }
 

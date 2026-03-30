@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use usn_journal_rs::journal::EnumOptions;
 use usn_journal_rs::path::PathResolver;
 
@@ -147,12 +147,17 @@ pub struct IncrementalUpdater {
     monitor: Option<UsnMonitor>,
     enabled: Arc<AtomicBool>,
     volumes: Vec<String>,
-    // 记录每个卷的上次 USN 位置
-    last_usn: HashMap<String, i64>,
-    // 无新记录时的检查间隔（默认 1 小时）
+    // 注意：last_usn 不再存储在这里，而是从 CacheManager 统一管理
+    // 活跃检查间隔（1秒）
+    active_check_interval: Duration,
+    // 空闲检查间隔（1小时）
     idle_check_interval: Duration,
-    // 标记是否有新记录
+    // 当前检查间隔
+    check_interval: Duration,
+    // 标记是否有新记录（基于读取数量）
     has_new_records: bool,
+    // 首次进入空闲模式的时间
+    idle_since: Option<Instant>,
 }
 
 impl IncrementalUpdater {
@@ -162,10 +167,31 @@ impl IncrementalUpdater {
             monitor: None,
             enabled: Arc::new(AtomicBool::new(false)),
             volumes: Vec::new(),
-            last_usn: HashMap::new(),
-            idle_check_interval: Duration::from_secs(3600), // 默认 1 小时
+            // last_usn 现在从 CacheManager 统一获取，不再在这里存储
+            active_check_interval: Duration::from_secs(1),    // 活跃模式 1 秒
+            idle_check_interval: Duration::from_secs(3600),   // 空闲模式 1 小时
+            check_interval: Duration::from_secs(1),           // 默认 1 秒
             has_new_records: false,
+            idle_since: None,
         }
+    }
+
+    /// 获取是否有新记录
+    pub fn has_new_records(&self) -> bool {
+        self.has_new_records
+    }
+
+    /// 获取当前检查间隔
+    pub fn get_check_interval(&self) -> Duration {
+        self.check_interval
+    }
+
+    /// 持久化缓存和 USN 状态（统一保存到索引缓存）
+    fn persist_all(&self) {
+        // 保存索引缓存（包含 USN 状态）
+        let cache_manager = get_cache_manager();
+        cache_manager.flush();
+        log::info!("缓存和 USN 状态已持久化（统一到索引缓存）");
     }
 
     /// 初始化（指定要监控的卷）
@@ -218,12 +244,15 @@ impl IncrementalUpdater {
     /// 用于跳过历史记录或重新扫描
     pub fn set_last_usn(&mut self, volume: &str, usn: i64) {
         log::info!("手动设置卷 {} 的 USN 位置为: {}", volume, usn);
-        self.last_usn.insert(volume.to_string(), usn);
+        // 存储到 CacheManager（统一管理）
+        let cache_manager = get_cache_manager();
+        cache_manager.set_usn(volume, usn);
     }
 
-    /// 获取指定卷的当前 USN 位置
+    /// 获取指定卷的当前 USN 位置（从 CacheManager 获取）
     pub fn get_last_usn(&self, volume: &str) -> Option<i64> {
-        self.last_usn.get(volume).copied()
+        let cache_manager = get_cache_manager();
+        cache_manager.get_usn(volume)
     }
 
     /// 执行一次增量更新，返回是否有新记录
@@ -263,8 +292,8 @@ impl IncrementalUpdater {
         let reason_rename_new: u32 = USN_REASON_RENAME_NEW_NAME;
         let reason_rename_old: u32 = USN_REASON_RENAME_OLD_NAME;
 
-        // 获取上次读取的 USN 位置
-        let last_usn = self.last_usn.get(&monitor.volume).copied().unwrap_or(0i64);
+        // 获取上次读取的 USN 位置（从 CacheManager 统一获取）
+        let last_usn = self.get_last_usn(&monitor.volume).unwrap_or(0i64);
 
         log::info!("开始读取 USN，日志: {}, 上次位置: {}", drive_letter, last_usn);
 
@@ -283,10 +312,12 @@ impl IncrementalUpdater {
         // 记录本次读取的最大 USN
         let mut max_usn: i64 = last_usn;
 
-        // 每次最多处理 100 条记录，避免长时间阻塞
-        let max_records_per_batch = 300;
+        // 每次最多处理 xxx 条记录，避免长时间阻塞
+        let max_records_per_batch = 200;
 
-        // 统计本次处理的条目数
+        // 统计迭代器返回的总数量
+        let mut total_count = 0;
+        // 统计实际处理的条目数（非临时文件）
         let mut processed_count = 0;
 
         match iter_result {
@@ -303,22 +334,22 @@ impl IncrementalUpdater {
                     match result {
                         Ok(entry) => {
                             entry_usn = entry.usn;
+                            total_count += 1;  // 每次迭代都计数
 
                             // reason 是 u32
                             let reason_mask = entry.reason;
                             let is_relevant = (reason_mask & (reason_file_create | reason_file_delete | reason_rename_new | reason_rename_old)) != 0;
 
                             if is_relevant {
-                                // 检查是否已达到最大处理数量（只统计实际处理的记录）
+                                // 将 OsString 转换为 String
                                 if processed_count >= max_records_per_batch {
                                     log::info!("已达到最大处理数量 {}，退出迭代", max_records_per_batch);
                                     break;
                                 }
 
-                                // 将 OsString 转换为 String
                                 let file_name_str = entry.file_name.to_string_lossy().to_string();
 
-                                // 过滤临时文件（不计入处理数量）
+                                // 过滤临时文件（不计入处理数量，但仍统计总数）
                                 if is_temp_file(&file_name_str) {
                                     log::debug!("跳过临时文件: {}", file_name_str);
                                     // 仍然更新 max_usn
@@ -327,6 +358,7 @@ impl IncrementalUpdater {
                                     }
                                     continue;
                                 }
+
 
                                 // 使用 PathResolver 解析完整路径
                                 let mut resolver = PathResolver::new_with_cache(&volume);
@@ -387,17 +419,46 @@ impl IncrementalUpdater {
             }
         }
 
-        // 更新上次读取的 USN 位置并返回是否有新记录
-        if max_usn > last_usn {
-            self.last_usn.insert(monitor.volume.clone(), max_usn);
+        // 根据 total_count 判断是否保持活跃模式
+        if total_count >= 200 {
+            // 有更多记录，保持活跃模式
             self.has_new_records = true;
-            log::debug!("更新 USN 位置: {} -> {}，处理了 {} 条新记录", monitor.volume, max_usn, processed_count);
+            self.check_interval = self.active_check_interval;
+            self.idle_since = None;  // 重置空闲时间
+            log::debug!("读取 {} 条记录，保持活跃模式 (1秒)", total_count);
         } else {
+            // 没有更多记录，进入空闲模式
             self.has_new_records = false;
-            log::debug!("无新 USN 记录");
+            self.check_interval = self.idle_check_interval;
+
+            // 记录首次进入空闲的时间
+            if self.idle_since.is_none() {
+                self.idle_since = Some(Instant::now());
+                log::info!("首次进入空闲模式");
+            }
+
+            // 检查是否需要持久化
+            // 不要在update_once里面做，持久化保存，防止搜索时间过久
+            // if let Some(idle_start) = self.idle_since {
+            //     if idle_start.elapsed() >= self.idle_check_interval {
+            //         // 超过 1 小时没有新记录，持久化
+            //         log::info!("空闲超过 1 小时，持久化缓存和 USN 状态");
+            //         self.persist_all();
+            //         self.idle_since = Some(Instant::now());  // 重置计时
+            //     }
+            // }
+
+            log::debug!("读取 {} 条记录，进入空闲模式 (1小时)", total_count);
         }
 
-        log::debug!("增量更新检查完成");
+        // 更新上次读取的 USN 位置（保存到 CacheManager）
+        if max_usn > last_usn {
+            let cache_manager = get_cache_manager();
+            cache_manager.set_usn(&monitor.volume, max_usn);
+            log::debug!("更新 USN 位置: {} -> {}，处理了 {} 条新记录", monitor.volume, max_usn, processed_count);
+        }
+
+        log::debug!("增量更新检查完成，total_count: {}", total_count);
         Ok(self.has_new_records)
     }
 
@@ -413,26 +474,42 @@ impl Default for IncrementalUpdater {
     }
 }
 
-// 全局增量更新器
+// 全局增量更新器（使用 RwLock 以避免读操作阻塞）
 lazy_static::lazy_static! {
-    static ref INCREMENTAL_UPDATER: std::sync::Mutex<IncrementalUpdater> =
-        std::sync::Mutex::new(IncrementalUpdater::new());
+    static ref INCREMENTAL_UPDATER: std::sync::RwLock<IncrementalUpdater> =
+        std::sync::RwLock::new(IncrementalUpdater::new());
 }
 
 /// 后台监控线程是否正在运行
 static mut BACKGROUND_MONITOR_RUNNING: bool = false;
 
+/// 检查增量更新服务是否已经在运行
+pub fn is_incremental_service_running() -> bool {
+    // 检查后台线程是否在运行
+    unsafe {
+        if BACKGROUND_MONITOR_RUNNING {
+            return true;
+        }
+    }
+
+    // 检查 updater 是否已启用（使用 read() 避免阻塞）
+    if let Ok(updater) = INCREMENTAL_UPDATER.read() {
+        return updater.is_enabled();
+    }
+
+    false
+}
+
 /// 启动增量更新服务
 pub fn start_incremental_service(volumes: Vec<String>) -> Result<Vec<UsnJournalStatus>, String> {
     log::info!("启动增量更新服务，卷: {:?}", volumes);
 
-    // 先加载之前保存的 USN 状态
-    init_usn_state();
+    // USN 状态现在从 CacheManager 统一加载（加载缓存时自动恢复）
 
     let mut results = Vec::new();
 
     for volume in volumes {
-        let mut updater = INCREMENTAL_UPDATER.lock().map_err(|e| e.to_string())?;
+        let mut updater = INCREMENTAL_UPDATER.write().map_err(|e| e.to_string())?;
         match updater.init(&volume) {
             Ok(status) => {
                 results.push(status);
@@ -458,7 +535,7 @@ pub fn start_incremental_service(volumes: Vec<String>) -> Result<Vec<UsnJournalS
 /// 启动后台监控线程
 fn start_background_monitor() {
     // 获取 updater 的引用
-    let updater = match INCREMENTAL_UPDATER.lock() {
+    let updater = match INCREMENTAL_UPDATER.write() {
         Ok(u) => u,
         Err(e) => {
             log::error!("获取增量更新器失败: {}", e);
@@ -483,42 +560,30 @@ fn start_background_monitor() {
 
     log::info!("启动后台 USN 监控线程");
 
+    // 默认检查间隔（1秒）
+    let default_interval = Duration::from_secs(1);
+
     thread::spawn(move || {
-        // 高频检查间隔（5毫秒）
-        let active_check_interval = Duration::from_millis(5);
-        // 空闲检查间隔（1小时）
-        let idle_check_interval = Duration::from_secs(3600);
-        // 每 5 分钟保存一次
-        let save_interval = Duration::from_secs(300);
-        let mut last_save = std::time::Instant::now();
-
-        // 当前是否处于空闲状态
-        let mut is_idle = false;
-
         loop {
             if !enabled.load(Ordering::SeqCst) {
                 log::info!("增量更新已禁用，停止后台监控");
-                // 退出前保存状态
-                let _ = save_usn_state();
+                // 退出前保存状态（统一保存到索引缓存）
+                let cache_manager = get_cache_manager();
+                cache_manager.flush();
                 break;
             }
 
-            let mut has_new_records = false;
-
-            // 重新获取 updater 并调用 update_once
-            if let Ok(mut updater) = INCREMENTAL_UPDATER.lock() {
+            // 获取检查间隔（默认1秒，防止无法获取锁时阻塞）
+            let current_interval = if let Ok(mut updater) = INCREMENTAL_UPDATER.write() {
                 if updater.is_enabled() {
                     // 遍历所有监控的卷
                     for volume in &volumes {
                         log::debug!("检查卷 {} 的 USN 变化", volume);
 
                         match updater.update_once() {
-                            Ok(has_new) => {
+                            Ok(_has_new) => {
                                 // 增量更新成功
-                                if has_new {
-                                    log::debug!("卷 {} 有新 USN 记录", volume);
-                                    has_new_records = true;
-                                }
+                                // update_once 内部已经更新了 check_interval 和 idle_since
                             }
                             Err(e) => {
                                 log::warn!("卷 {} 增量更新失败: {}", volume, e);
@@ -526,28 +591,15 @@ fn start_background_monitor() {
                         }
                     }
                 }
-            }
-
-            // 定期保存 USN 状态（每 5 分钟）
-            if last_save.elapsed() >= save_interval {
-                if let Err(e) = save_usn_state() {
-                    log::warn!("定期保存 USN 状态失败: {}", e);
-                } else {
-                    last_save = std::time::Instant::now();
-                }
-            }
-
-            // 根据是否有新记录调整检查间隔
-            if has_new_records {
-                is_idle = false;
-                thread::sleep(active_check_interval);
+                // 在锁内部获取间隔
+                updater.get_check_interval()
             } else {
-                if !is_idle {
-                    log::info!("无新 USN 记录，进入空闲模式，1 小时后再次检查");
-                    is_idle = true;
-                }
-                thread::sleep(idle_check_interval);
-            }
+                // 无法获取锁时使用默认间隔
+                default_interval
+            };
+
+            // 锁已释放，现在可以安全地 sleep
+            thread::sleep(current_interval);
         }
 
         unsafe {
@@ -561,7 +613,7 @@ fn start_background_monitor() {
 pub fn stop_incremental_service() {
     log::info!("停止增量更新服务");
 
-    if let Ok(updater) = INCREMENTAL_UPDATER.lock() {
+    if let Ok(updater) = INCREMENTAL_UPDATER.write() {
         updater.enabled.store(false, Ordering::SeqCst);
     }
 
@@ -570,8 +622,18 @@ pub fn stop_incremental_service() {
 }
 
 /// 获取增量更新器
-pub fn get_incremental_updater() -> &'static std::sync::Mutex<IncrementalUpdater> {
+pub fn get_incremental_updater() -> &'static std::sync::RwLock<IncrementalUpdater> {
     &INCREMENTAL_UPDATER
+}
+
+/// 检查是否有新记录（基于最近的增量更新）
+/// 返回 true 表示有新增的文件变化未被搜索到
+/// 使用 read() 实现并发读取，不会阻塞搜索线程
+pub fn has_new_records() -> bool {
+    if let Ok(updater) = INCREMENTAL_UPDATER.read() {
+        return updater.has_new_records();
+    }
+    false
 }
 
 /// 手动触发一次增量更新（供外部调用）
@@ -581,7 +643,7 @@ pub fn trigger_incremental_update() -> bool {
 
     let mut has_new_records = false;
 
-    if let Ok(mut updater) = INCREMENTAL_UPDATER.lock() {
+    if let Ok(mut updater) = INCREMENTAL_UPDATER.write() {
         if updater.is_enabled() {
             for volume in updater.get_volumes() {
                 log::info!("手动更新卷: {}", volume);
@@ -617,17 +679,22 @@ pub fn trigger_incremental_update() -> bool {
 pub fn set_last_usn(volume: &str, usn: i64) -> Result<(), String> {
     log::info!("手动设置卷 {} 的 USN 位置为: {}", volume, usn);
 
-    let mut updater = INCREMENTAL_UPDATER.lock().map_err(|e| e.to_string())?;
-    updater.set_last_usn(volume, usn);
+    // 保存到 CacheManager（统一管理）
+    let cache_manager = get_cache_manager();
+    cache_manager.set_usn(volume, usn);
+
+    // 同步更新到增量更新器
+    if let Ok(mut updater) = INCREMENTAL_UPDATER.write() {
+        updater.set_last_usn(volume, usn);
+    }
+
     Ok(())
 }
 
-/// 获取指定卷的当前 USN 位置
+/// 获取指定卷的当前 USN 位置（从 CacheManager 获取）
 pub fn get_last_usn(volume: &str) -> Option<i64> {
-    if let Ok(updater) = INCREMENTAL_UPDATER.lock() {
-        return updater.get_last_usn(volume);
-    }
-    None
+    let cache_manager = get_cache_manager();
+    cache_manager.get_usn(volume)
 }
 
 /// 检查是否是临时文件
@@ -696,74 +763,27 @@ fn get_file_attributes(path: &str) -> (u64, bool, i64) {
 
 // ==================== 持久化保存功能 ====================
 
-/// 保存 USN 状态到磁盘
+/// 保存 USN 状态（已废弃，请使用 CacheManager.flush()）
+/// 保留此函数用于向后兼容，但不再使用单独的 JSON 文件
+#[deprecated(note = "USN 状态已统一存储到索引缓存中，请使用 get_cache_manager().flush()")]
 pub fn save_usn_state() -> Result<(), String> {
-    log::info!("开始保存 USN 状态");
-
-    let updater = INCREMENTAL_UPDATER.lock().map_err(|e| e.to_string())?;
-    let last_usn = updater.last_usn.clone();
-    log::info!("当前 last_usn 数据: {:?}", last_usn);
-    drop(updater);
-
-    if last_usn.is_empty() {
-        log::warn!("last_usn 为空，跳过保存");
-        return Ok(());
-    }
-
-    save_usn_state_to_disk(&last_usn)
-}
-
-/// 保存 USN 状态到磁盘文件
-fn save_usn_state_to_disk(last_usn: &HashMap<String, i64>) -> Result<(), String> {
-    let file_path = get_usn_state_file_path();
-
-    let json = serde_json::to_string_pretty(last_usn)
-        .map_err(|e| format!("序列化失败: {}", e))?;
-
-    let mut file = fs::File::create(&file_path)
-        .map_err(|e| format!("创建文件失败: {}", e))?;
-
-    file.write_all(json.as_bytes())
-        .map_err(|e| format!("写入文件失败: {}", e))?;
-
-    log::info!("USN 状态已保存到: {:?}", file_path);
+    log::info!("保存 USN 状态（已统一到索引缓存）");
+    let cache_manager = get_cache_manager();
+    cache_manager.flush();
     Ok(())
 }
 
-/// 从磁盘加载 USN 状态
+/// 加载 USN 状态（已废弃，USN 状态在加载缓存时自动恢复）
+#[deprecated(note = "USN 状态在加载缓存时自动恢复")]
 pub fn load_usn_state() -> Result<HashMap<String, i64>, String> {
-    let file_path = get_usn_state_file_path();
-
-    if !file_path.exists() {
-        log::info!("USN 状态文件不存在，返回空状态");
-        return Ok(HashMap::new());
-    }
-
-    let content = fs::read_to_string(&file_path)
-        .map_err(|e| format!("读取文件失败: {}", e))?;
-
-    let last_usn: HashMap<String, i64> = serde_json::from_str(&content)
-        .map_err(|e| format!("解析 JSON 失败: {}", e))?;
-
-    log::info!("从 {:?} 加载 USN 状态: {:?}", file_path, last_usn);
-    Ok(last_usn)
+    let cache_manager = get_cache_manager();
+    Ok(cache_manager.get_all_usn_states())
 }
 
-/// 初始化时加载 USN 状态
+/// 初始化 USN 状态（已废弃，USN 状态在加载缓存时自动恢复）
+#[deprecated(note = "USN 状态在加载缓存时自动恢复")]
 pub fn init_usn_state() {
-    match load_usn_state() {
-        Ok(last_usn) => {
-            if let Ok(mut updater) = INCREMENTAL_UPDATER.lock() {
-                for (volume, usn) in last_usn {
-                    updater.last_usn.insert(volume, usn);
-                }
-                log::info!("USN 状态加载成功");
-            }
-        }
-        Err(e) => {
-            log::warn!("加载 USN 状态失败: {}", e);
-        }
-    }
+    log::info!("USN 状态在加载缓存时自动恢复");
 }
 
 // ==================== 调试功能：获取最近 USN 记录 ====================

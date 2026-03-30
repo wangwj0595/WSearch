@@ -16,7 +16,8 @@ use std::sync::Arc;
 /// 缓存版本号
 /// v1: JSON 格式（旧版本）
 /// v2: MessagePack 格式（新版本，更快）
-const CACHE_VERSION: u32 = 2;
+/// v3: MessagePack 格式 + USN 状态（统一管理）
+const CACHE_VERSION: u32 = 3;
 
 /// 索引条目（用于二进制序列化）
 #[derive(Debug, Clone)]
@@ -42,6 +43,8 @@ pub struct IndexCache {
     is_valid: Arc<AtomicBool>,
     /// 索引版本
     version: u32,
+    /// 每个卷的 USN 状态（卷名 -> USN 值）
+    usn_states: HashMap<String, i64>,
 }
 
 /// 卷索引
@@ -60,6 +63,7 @@ impl IndexCache {
             last_update: std::time::Instant::now(),
             is_valid: Arc::new(AtomicBool::new(false)),
             version: CACHE_VERSION,
+            usn_states: HashMap::new(),
         }
     }
 
@@ -363,21 +367,52 @@ impl CacheManager {
         self.parse_cache_data(&data)
     }
 
-    /// 解析缓存数据（支持 v1 JSON 和 v2 MessagePack）
+    /// 解析缓存数据（支持 v1 JSON、v2 MessagePack 和 v3 MessagePack+USN）
     fn parse_cache_data(&self, data: &[u8]) -> bool {
-        // 简单格式: [version:4][count:4][entries...]
+        // v3 格式: [version:4][count:4][usn_count:4][usn_entries...][entries...]
+        // v2 格式: [version:4][count:4][entries...]
+        // v1 格式: [version:4][count:4][entries...]
         if data.len() < 8 {
             log::warn!("缓存文件太小");
             return false;
         }
 
         let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        let _count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
 
         // 根据版本选择解析方式
         match version {
             1 => self.parse_json_format(&data[8..]),
-            2 => self.parse_msgpack_format(&data[8..]),
+            2 => self.parse_msgpack_format(&data[8..], None),
+            3 => {
+                // v3 格式包含 USN 状态
+                if data.len() < 12 {
+                    log::warn!("缓存文件太小（v3）");
+                    return false;
+                }
+                let usn_count = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+                let mut offset = 12;
+
+                // 解析 USN 状态
+                let mut usn_states: HashMap<String, i64> = HashMap::new();
+                for _ in 0..usn_count {
+                    if offset + 12 > data.len() {
+                        break;
+                    }
+                    let volume_name_len = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize;
+                    offset += 4;
+                    if offset + volume_name_len + 8 > data.len() {
+                        break;
+                    }
+                    let volume_name = String::from_utf8_lossy(&data[offset..offset+volume_name_len]).to_string();
+                    offset += volume_name_len;
+                    let usn = i64::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3], data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
+                    offset += 8;
+                    usn_states.insert(volume_name, usn);
+                }
+                log::info!("从缓存加载 USN 状态: {:?}", usn_states);
+                self.parse_msgpack_format(&data[offset..], Some(usn_states))
+            }
             _ => {
                 log::warn!("未知缓存版本: {}", version);
                 false
@@ -395,11 +430,11 @@ impl CacheManager {
             }
         };
 
-        self.build_index_from_entries(&entries)
+        self.build_index_from_entries(&entries, None)
     }
 
-    /// 解析 MessagePack 格式（v2）
-    fn parse_msgpack_format(&self, data: &[u8]) -> bool {
+    /// 解析 MessagePack 格式（v2/v3）
+    fn parse_msgpack_format(&self, data: &[u8], usn_states: Option<HashMap<String, i64>>) -> bool {
         let entries: Vec<MftFileEntry> = match rmp_serde::from_slice(data) {
             Ok(e) => e,
             Err(e) => {
@@ -408,11 +443,11 @@ impl CacheManager {
             }
         };
 
-        self.build_index_from_entries(&entries)
+        self.build_index_from_entries(&entries, usn_states)
     }
 
     /// 从条目构建内存索引（公共方法，供两种格式共用）
-    fn build_index_from_entries(&self, entries: &[MftFileEntry]) -> bool {
+    fn build_index_from_entries(&self, entries: &[MftFileEntry], usn_states: Option<HashMap<String, i64>>) -> bool {
         // 构建内存索引
         let mut index = IndexCache::new();
         for entry in entries {
@@ -450,6 +485,11 @@ impl CacheManager {
         index.is_valid.store(true, Ordering::SeqCst);
         index.last_update = std::time::Instant::now();
 
+        // 恢复 USN 状态（如果有）
+        if let Some(states) = usn_states {
+            index.usn_states = states;
+        }
+
         // 替换索引
         let mut guard = self.index.write();
         *guard = index;
@@ -483,6 +523,7 @@ impl CacheManager {
     }
 
     /// 保存缓存到文件（使用 MessagePack 序列化 + BufWriter 缓冲写入）
+    /// v3 格式: [version:4][count:4][usn_count:4][usn_entries...][entries...]
     pub fn save_cache(&self) -> bool {
         let index = self.index.read();
 
@@ -513,10 +554,28 @@ impl CacheManager {
             }
         };
 
-        // 构建缓存文件: [version:4][count:4][msgpack_data]
-        let mut cache_data = Vec::with_capacity(8 + msgpack_data.len());
+        // 序列化 USN 状态
+        let usn_states = &index.usn_states;
+        let usn_count = usn_states.len() as u32;
+
+        // 计算 USN 状态数据大小并构建
+        let mut usn_data = Vec::new();
+        for (volume, usn) in usn_states {
+            let volume_bytes = volume.as_bytes();
+            let volume_len = volume_bytes.len() as u32;
+            usn_data.extend_from_slice(&volume_len.to_le_bytes());
+            usn_data.extend_from_slice(volume_bytes);
+            usn_data.extend_from_slice(&usn.to_le_bytes());
+        }
+
+        log::info!("保存 USN 状态: {:?}, 共 {} 个卷", usn_states, usn_count);
+
+        // 构建缓存文件: [version:4][count:4][usn_count:4][usn_data...][msgpack_data]
+        let mut cache_data = Vec::with_capacity(12 + usn_data.len() + msgpack_data.len());
         cache_data.extend_from_slice(&CACHE_VERSION.to_le_bytes());
         cache_data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        cache_data.extend_from_slice(&usn_count.to_le_bytes());
+        cache_data.extend_from_slice(&usn_data);
         cache_data.extend_from_slice(&msgpack_data);
 
         // 使用 BufWriter 缓冲写入，提升 I/O 性能
@@ -540,7 +599,7 @@ impl CacheManager {
             return false;
         }
 
-        log::info!("缓存保存成功");
+        log::info!("缓存保存成功（v3），包含 {} 个卷的 USN 状态", usn_count);
         true
     }
 
@@ -913,6 +972,25 @@ impl CacheManager {
     /// 批量保存更改（在适当的时候调用）
     pub fn flush(&self) {
         self.save_cache();
+    }
+
+    /// 获取指定卷的 USN 值
+    pub fn get_usn(&self, volume: &str) -> Option<i64> {
+        let index = self.index.read();
+        index.usn_states.get(volume).copied()
+    }
+
+    /// 设置指定卷的 USN 值
+    pub fn set_usn(&self, volume: &str, usn: i64) {
+        let mut index = self.index.write();
+        index.usn_states.insert(volume.to_string(), usn);
+        log::info!("设置卷 {} 的 USN 状态: {}", volume, usn);
+    }
+
+    /// 获取所有 USN 状态的副本（用于外部访问）
+    pub fn get_all_usn_states(&self) -> HashMap<String, i64> {
+        let index = self.index.read();
+        index.usn_states.clone()
     }
 }
 
