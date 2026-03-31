@@ -617,11 +617,11 @@ impl CacheManager {
         self.file_count.store(self.index.read().len() as u64, Ordering::SeqCst);
 
         // 保存到缓存
-        self.save_cache();
+        // self.save_cache();
 
         // 保存 USN 状态
         #[cfg(windows)]
-        self.save_usn_state(volume_root);
+        self.save_cache_and_usn(volume_root);
 
         self.is_building.store(false, Ordering::SeqCst);
     }
@@ -677,11 +677,11 @@ impl CacheManager {
         self.file_count.store(self.index.read().len() as u64, Ordering::SeqCst);
 
         // 保存到缓存
-        self.save_cache();
+        // self.save_cache();
 
         // 保存 USN 状态
         #[cfg(windows)]
-        self.save_usn_state(volume_root);
+        self.save_cache_and_usn(volume_root);
 
         self.is_building.store(false, Ordering::SeqCst);
 
@@ -690,7 +690,7 @@ impl CacheManager {
 
     /// 保存 USN 状态（读取 USN Journal 的 next_usn 并保存）
     #[cfg(windows)]
-    fn save_usn_state(&self, volume_root: &str) {
+    fn save_cache_and_usn(&self, volume_root: &str) {
         // 提取盘符
         let drive_char = volume_root.chars().next().unwrap_or('C');
 
@@ -712,9 +712,7 @@ impl CacheManager {
                         }
 
                         // 保存到磁盘
-                        if let Err(e) = usn_monitor::save_usn_state() {
-                            log::warn!("保存 USN 状态失败: {}", e);
-                        }
+                        get_cache_manager().flush();
                     }
                     Err(e) => {
                         log::warn!("查询 USN Journal 失败: {:?}", e);

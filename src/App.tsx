@@ -541,10 +541,9 @@ function AppContent() {
       // 去重
       const uniqueVolumes = [...new Set(volumes)];
 
-      for (const volume of uniqueVolumes) {
-        const result = await invoke<string>("refresh_index", { volume });
-        message.success(result);
-      }
+      // 传递卷列表到后端，后端循环处理
+      const result = await invoke<string>("refresh_index", { volumes: uniqueVolumes });
+      message.success(result);
     } catch (e) {
       message.error(`更新索引失败: ${e}`);
     } finally {

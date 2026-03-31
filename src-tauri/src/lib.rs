@@ -7,7 +7,7 @@ use commands::{
     get_search_config, get_search_history, get_window_config, open_file, refresh_index, rename_file, reveal_in_explorer, save_search_config,
     save_window_config, search_files, SearchState,
 };
-use services::{init_cache, start_incremental_service, stop_incremental_service, save_usn_state, ConfigStore};
+use services::{init_cache, start_incremental_service, ConfigStore};
 use tauri::LogicalSize;
 use tauri::Manager;
 

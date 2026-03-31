@@ -198,10 +198,10 @@ pub fn cancel_search(search_state: State<'_, SearchState>) -> Result<(), String>
     Ok(())
 }
 
-/// 更新索引（强制重建指定卷的索引）
+/// 更新索引（强制重建指定卷的索引）- 接受卷列表，后端循环处理
 #[tauri::command]
-pub async fn refresh_index(volume: String) -> Result<String, String> {
-    use crate::services::file_scanner::FileScanner;
+pub async fn refresh_index(volumes: Vec<String>) -> Result<String, String> {
+    // use crate::services::file_scanner::FileScanner;
     use crate::services::index_cache::get_cache_manager;
     use crate::services::mft_reader;
     use crate::services::is_running_as_admin;
@@ -212,12 +212,14 @@ pub async fn refresh_index(volume: String) -> Result<String, String> {
         return Err("需要管理员权限才能更新索引".to_string());
     }
 
-    // 检查 NTFS 卷
-    if !mft_reader::is_ntfs_volume(&volume) {
-        return Err(format!("卷 {} 不是 NTFS 格式", volume));
+    if volumes.is_empty() {
+        return Err("请至少提供一个卷".to_string());
     }
 
-    log::info!("开始更新卷 {} 的索引", volume);
+    // 去重
+    let unique_volumes: Vec<String> = volumes.into_iter().collect::<std::collections::HashSet<_>>().into_iter().collect();
+
+    log::info!("开始更新 {} 个卷的索引: {:?}", unique_volumes.len(), unique_volumes);
 
     // 重建索引前先停止 USN Monitor，避免竞争条件
     log::info!("停止 USN Monitor");
@@ -226,35 +228,73 @@ pub async fn refresh_index(volume: String) -> Result<String, String> {
     // 等待一小段时间让后台线程完成
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // 读取 MFT
-    let mft_entries = mft_reader::scan_volume_files(&volume);
+    let mut total_files = 0;
+    let mut success_count = 0;
+    let mut error_messages = Vec::new();
 
-    if mft_entries.is_empty() {
-        // 恢复 USN Monitor
-        let _ = usn_monitor::start_incremental_service(vec![volume.clone()]);
-        return Err("无法读取 MFT 数据".to_string());
-    }
-
-    // 获取缓存管理器并更新索引
+    // 获取缓存管理器
     let cache_manager = get_cache_manager();
 
-    // 检查是否已有该卷的索引
-    if cache_manager.has_path(&volume) {
-        // 已有索引，完全替换
-        cache_manager.update_from_mft(mft_entries, &volume);
-    } else {
-        // 新卷，增量添加
-        cache_manager.add_volume_from_mft(mft_entries, &volume);
+    // 循环处理每个卷
+    for volume in &unique_volumes {
+        log::info!("正在更新卷 {} 的索引", volume);
+
+        // 检查 NTFS 卷
+        if !mft_reader::is_ntfs_volume(volume) {
+            let err_msg = format!("卷 {} 不是 NTFS 格式", volume);
+            log::warn!("{}", err_msg);
+            error_messages.push(err_msg);
+            continue;
+        }
+
+        // 读取 MFT
+        let mft_entries = mft_reader::scan_volume_files(volume);
+
+        if mft_entries.is_empty() {
+            let err_msg = format!("卷 {} 无法读取 MFT 数据", volume);
+            log::warn!("{}", err_msg);
+            error_messages.push(err_msg);
+            continue;
+        }
+
+        let file_count = mft_entries.len();
+
+        // 检查是否已有该卷的索引
+        if cache_manager.has_path(volume) {
+            // 已有索引，完全替换
+            cache_manager.update_from_mft(mft_entries, volume);
+        } else {
+            // 新卷，增量添加
+            cache_manager.add_volume_from_mft(mft_entries, volume);
+        }
+
+        total_files += file_count;
+        success_count += 1;
+        log::info!("卷 {} 索引更新完成，共 {} 个文件", volume, file_count);
     }
 
-    log::info!("卷 {} 索引更新完成，重启 USN Monitor", volume);
-
-    // 重建索引后重新启动 USN Monitor
-    // 注意：start_incremental_service 会自动加载之前保存的 USN 状态
-    if let Err(e) = usn_monitor::start_incremental_service(vec![volume.clone()]) {
+    // 所有卷处理完成后，重新启动 USN Monitor
+    log::info!("所有卷索引更新完成，重启 USN Monitor");
+    if usn_monitor::is_incremental_service_running() {
+        log::debug!("增量更新服务已在运行，跳过启动");
+    }else if let Err(e) = usn_monitor::start_incremental_service(unique_volumes.clone()) {
         log::warn!("重启 USN Monitor 失败: {}", e);
     }
 
-    log::info!("卷 {} 索引更新完成", volume);
-    Ok(format!("索引更新成功，共 {} 个文件", cache_manager.file_count()))
+    // 构建返回消息
+    let result_msg = if success_count == unique_volumes.len() {
+        format!("索引更新成功，共 {} 个文件（{} 个卷）", total_files, success_count)
+    } else if success_count > 0 {
+        let msg = format!("索引更新完成，成功 {} 个卷，共 {} 个文件", success_count, total_files);
+        if !error_messages.is_empty() {
+            format!("{}\n错误: {}", msg, error_messages.join("; "))
+        } else {
+            msg
+        }
+    } else {
+        "所有卷索引更新失败".to_string()
+    };
+
+    log::info!("卷 {} 索引更新完成", unique_volumes.join(", "));
+    Ok(result_msg)
 }

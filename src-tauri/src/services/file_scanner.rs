@@ -364,6 +364,7 @@ impl FileScanner {
         let start_time = Instant::now();
         let found_count = AtomicU64::new(0);
         let cache_manager = get_cache_manager();
+        let mut entries = Vec::new();
 
         // 首先尝试加载缓存（如果还没有加载或之前加载失败）
         if !cache_manager.is_valid() {
@@ -390,13 +391,13 @@ impl FileScanner {
             });
 
             // 调用 get_or_build_mft_index 来增量添加新卷
-            let _entries = Self::get_or_build_mft_index(&config.search_paths);
+            entries = Self::get_or_build_mft_index(&config.search_paths);
         }
 
         // 检查缓存是否有效
         if cache_manager.is_valid() {
             // 启动增量更新服务（如果尚未启动）
-            Self::start_incremental_service_if_needed(&config.search_paths);
+            // Self::start_incremental_service_if_needed(&config.search_paths);
 
             // 检查是否有新记录
             if usn_monitor::has_new_records() {
@@ -487,7 +488,7 @@ impl FileScanner {
             }
 
             // 发送最终进度
-            let elapsed = start_time.elapsed().as_secs();
+            let elapsed = start_time.elapsed().as_millis() as u64;
             let progress = SearchProgress {
                 scanned_count: cache_manager.file_count(),
                 found_count: found_count.load(Ordering::SeqCst),
@@ -500,135 +501,122 @@ impl FileScanner {
             return;
         }
 
-        // 缓存无效，需要重建索引
-        // 发送初始进度
-        let _ = progress_tx.send(SearchProgress {
-            scanned_count: 0,
-            found_count: 0,
-            current_path: "正在建立 MFT 索引...".to_string(),
-            elapsed_time: 0,
-            estimated_remaining: 0,
-        });
-
-        // 获取或更新 MFT 索引
-        let entries = Self::get_or_build_mft_index(&config.search_paths);
-
         if entries.is_empty() {
             // 索引为空，回退到 WalkDir
             return Self::search_worker_walkdir(config, query, result_tx, progress_tx, is_cancelled);
         }
 
         // 解析关键词
-        let keywords: Vec<String> = query
-            .split_whitespace()
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                if config.case_sensitive {
-                    s.to_string()
-                } else {
-                    s.to_lowercase()
-                }
-            })
-            .collect();
+        // let keywords: Vec<String> = query
+        //     .split_whitespace()
+        //     .filter(|s| !s.is_empty())
+        //     .map(|s| {
+        //         if config.case_sensitive {
+        //             s.to_string()
+        //         } else {
+        //             s.to_lowercase()
+        //         }
+        //     })
+        //     .collect();
 
-        let max_results = config.max_results as u64;
-        let scanned_total = AtomicU64::new(0);
-        let total_entries = entries.len() as u64;
+        // let max_results = config.max_results as u64;
+        // let scanned_total = AtomicU64::new(0);
+        // let total_entries = entries.len() as u64;
 
-        // 在内存中搜索（非常快）
-        for entry in entries {
-            if is_cancelled.load(Ordering::SeqCst) {
-                break;
-            }
+        // // 在内存中搜索（非常快）
+        // for entry in entries {
+        //     if is_cancelled.load(Ordering::SeqCst) {
+        //         break;
+        //     }
 
-            if found_count.load(Ordering::SeqCst) >= max_results {
-                break;
-            }
+        //     if found_count.load(Ordering::SeqCst) >= max_results {
+        //         break;
+        //     }
 
-            let scanned = scanned_total.fetch_add(1, Ordering::SeqCst);
+        //     let scanned = scanned_total.fetch_add(1, Ordering::SeqCst);
 
-            // 每扫描1000个文件发送一次进度
-            if scanned % 1000 == 0 {
-                let elapsed = start_time.elapsed().as_secs();
-                let progress = SearchProgress {
-                    scanned_count: scanned,
-                    found_count: found_count.load(Ordering::SeqCst),
-                    current_path: entry.path.clone(),
-                    elapsed_time: elapsed,
-                    estimated_remaining: 0,
-                };
-                let _ = progress_tx.send(progress);
-            }
+        //     // 每扫描1000个文件发送一次进度
+        //     if scanned % 1000 == 0 {
+        //         let elapsed = start_time.elapsed().as_secs();
+        //         let progress = SearchProgress {
+        //             scanned_count: scanned,
+        //             found_count: found_count.load(Ordering::SeqCst),
+        //             current_path: entry.path.clone(),
+        //             elapsed_time: elapsed,
+        //             estimated_remaining: 0,
+        //         };
+        //         let _ = progress_tx.send(progress);
+        //     }
 
-            // 检查文件名匹配
-            let name_check = if config.case_sensitive {
-                entry.name.clone()
-            } else {
-                entry.name.to_lowercase()
-            };
+        //     // 检查文件名匹配
+        //     let name_check = if config.case_sensitive {
+        //         entry.name.clone()
+        //     } else {
+        //         entry.name.to_lowercase()
+        //     };
 
-            let mut is_match = keywords.iter().all(|k| name_check.contains(k));
+        //     let mut is_match = keywords.iter().all(|k| name_check.contains(k));
 
-            // 检查文件类型过滤
-            if is_match && !config.file_types.is_empty() {
-                if let Some(ext) = entry.path.rsplit('.').next() {
-                    let ext_str = ext.to_lowercase();
-                    is_match = config.file_types.iter().any(|t| {
-                        let t_low = t.to_lowercase();
-                        t_low == ext_str || t_low == format!(".{}", ext_str)
-                    });
-                } else {
-                    is_match = false;
-                }
-            }
+        //     // 检查文件类型过滤
+        //     if is_match && !config.file_types.is_empty() {
+        //         if let Some(ext) = entry.path.rsplit('.').next() {
+        //             let ext_str = ext.to_lowercase();
+        //             is_match = config.file_types.iter().any(|t| {
+        //                 let t_low = t.to_lowercase();
+        //                 t_low == ext_str || t_low == format!(".{}", ext_str)
+        //             });
+        //         } else {
+        //             is_match = false;
+        //         }
+        //     }
 
-            // 如果不搜索目录，则跳过目录
-            if is_match && !config.search_directories && entry.is_directory {
-                continue;
-            }
+        //     // 如果不搜索目录，则跳过目录
+        //     if is_match && !config.search_directories && entry.is_directory {
+        //         continue;
+        //     }
 
-            // 检查文件大小过滤（目录不参与大小过滤）
-            if is_match && !entry.is_directory {
-                if config.min_size > 0 && entry.size < config.min_size {
-                    is_match = false;
-                }
-                if config.max_size > 0 && entry.size > config.max_size {
-                    is_match = false;
-                }
-            }
+        //     // 检查文件大小过滤（目录不参与大小过滤）
+        //     if is_match && !entry.is_directory {
+        //         if config.min_size > 0 && entry.size < config.min_size {
+        //             is_match = false;
+        //         }
+        //         if config.max_size > 0 && entry.size > config.max_size {
+        //             is_match = false;
+        //         }
+        //     }
 
-            if is_match {
-                let result = SearchResult {
-                    name: entry.name,
-                    path: entry.path,
-                    is_directory: entry.is_directory,
-                    size: entry.size,
-                    modified_time: entry.modified_time,
-                    match_content: None,
-                };
+        //     if is_match {
+        //         let result = SearchResult {
+        //             name: entry.name,
+        //             path: entry.path,
+        //             is_directory: entry.is_directory,
+        //             size: entry.size,
+        //             modified_time: entry.modified_time,
+        //             match_content: None,
+        //         };
 
-                let item = SearchResultItem {
-                    result,
-                    scanned_count: scanned,
-                };
-                let _ = result_tx.send(item);
-                found_count.fetch_add(1, Ordering::SeqCst);
-            }
-        }
+        //         let item = SearchResultItem {
+        //             result,
+        //             scanned_count: scanned,
+        //         };
+        //         let _ = result_tx.send(item);
+        //         found_count.fetch_add(1, Ordering::SeqCst);
+        //     }
+        // }
 
-        // 发送最终进度
-        let elapsed = start_time.elapsed().as_secs();
-        let progress = SearchProgress {
-            scanned_count: scanned_total.load(Ordering::SeqCst),
-            found_count: found_count.load(Ordering::SeqCst),
-            current_path: String::new(),
-            elapsed_time: elapsed,
-            estimated_remaining: 0,
-        };
-        let _ = progress_tx.send(progress);
+        // // 发送最终进度
+        // let elapsed = start_time.elapsed().as_secs();
+        // let progress = SearchProgress {
+        //     scanned_count: scanned_total.load(Ordering::SeqCst),
+        //     found_count: found_count.load(Ordering::SeqCst),
+        //     current_path: String::new(),
+        //     elapsed_time: elapsed,
+        //     estimated_remaining: 0,
+        // };
+        // let _ = progress_tx.send(progress);
 
         // 索引构建完成后启动增量更新服务
-        Self::start_incremental_service_if_needed(&config.search_paths);
+        // Self::start_incremental_service_if_needed(&config.search_paths);
     }
 
     /// 启动增量更新服务（如果尚未启动）
@@ -726,7 +714,7 @@ impl FileScanner {
         }
 
         // 增量添加新发现的卷
-        let mut has_new_volume = false;
+        // let mut has_new_volume = false;
 
         for volume_root in &volumes_to_index {
             log::info!("检测到新卷 {}，正在建立索引...", volume_root);
@@ -741,7 +729,7 @@ impl FileScanner {
                 if !mft_entries.is_empty() {
                     // 增量添加新卷的索引
                     cache_manager.add_volume_from_mft(mft_entries.clone(), volume_root);
-                    has_new_volume = true;
+                    // has_new_volume = true;
                     log::info!("卷 {} 索引构建完成，共 {} 个文件", volume_root, mft_entries.len());
                 } else {
                     log::warn!("卷 {} MFT 读取失败", volume_root);

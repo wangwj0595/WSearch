@@ -14,17 +14,17 @@ use usn_journal_rs::journal::EnumOptions;
 use usn_journal_rs::path::PathResolver;
 
 /// USN 状态文件路径
-fn get_usn_state_file_path() -> std::path::PathBuf {
-    let app_data = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let wsearch_dir = app_data.join("WSearch");
+// fn get_usn_state_file_path() -> std::path::PathBuf {
+//     let app_data = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+//     let wsearch_dir = app_data.join("WSearch");
 
-    // 确保目录存在
-    if !wsearch_dir.exists() {
-        let _ = fs::create_dir_all(&wsearch_dir);
-    }
+//     // 确保目录存在
+//     if !wsearch_dir.exists() {
+//         let _ = fs::create_dir_all(&wsearch_dir);
+//     }
 
-    wsearch_dir.join("usn_state.json")
-}
+//     wsearch_dir.join("usn_state.json")
+// }
 
 /// USN Journal 状态
 #[derive(Debug, Clone, serde::Serialize)]
@@ -480,14 +480,14 @@ lazy_static::lazy_static! {
         std::sync::RwLock::new(IncrementalUpdater::new());
 }
 
-/// 后台监控线程是否正在运行
-static mut BACKGROUND_MONITOR_RUNNING: bool = false;
+/// 后台监控线程句柄（使用 Option 以便在停止时获取）
+static mut BACKGROUND_MONITOR_HANDLE: Option<std::thread::JoinHandle<()>> = None;
 
 /// 检查增量更新服务是否已经在运行
 pub fn is_incremental_service_running() -> bool {
-    // 检查后台线程是否在运行
+    // 检查后台线程是否在运行（通过 JoinHandle 是否存在）
     unsafe {
-        if BACKGROUND_MONITOR_RUNNING {
+        if BACKGROUND_MONITOR_HANDLE.is_some() {
             return true;
         }
     }
@@ -504,9 +504,18 @@ pub fn is_incremental_service_running() -> bool {
 pub fn start_incremental_service(volumes: Vec<String>) -> Result<Vec<UsnJournalStatus>, String> {
     log::info!("启动增量更新服务，卷: {:?}", volumes);
 
-    // USN 状态现在从 CacheManager 统一加载（加载缓存时自动恢复）
+    // 确保之前的线程已完全停止
+    if is_incremental_service_running() {
+        log::info!("服务已在运行，先停止...");
+        stop_incremental_service();
+    }
 
     let mut results = Vec::new();
+
+    // 先清空 volumes，避免重复累积
+    if let Ok(mut updater) = INCREMENTAL_UPDATER.write() {
+        updater.volumes.clear();
+    }
 
     for volume in volumes {
         let mut updater = INCREMENTAL_UPDATER.write().map_err(|e| e.to_string())?;
@@ -534,6 +543,14 @@ pub fn start_incremental_service(volumes: Vec<String>) -> Result<Vec<UsnJournalS
 
 /// 启动后台监控线程
 fn start_background_monitor() {
+    // 如果已经有后台线程在运行，不再启动
+    unsafe {
+        if BACKGROUND_MONITOR_HANDLE.is_some() {
+            log::debug!("后台监控线程已在运行");
+            return;
+        }
+    }
+
     // 获取 updater 的引用
     let updater = match INCREMENTAL_UPDATER.write() {
         Ok(u) => u,
@@ -549,21 +566,13 @@ fn start_background_monitor() {
     // 释放锁
     drop(updater);
 
-    // 如果已经有后台线程在运行，不再启动
-    unsafe {
-        if BACKGROUND_MONITOR_RUNNING {
-            log::debug!("后台监控线程已在运行");
-            return;
-        }
-        BACKGROUND_MONITOR_RUNNING = true;
-    }
-
     log::info!("启动后台 USN 监控线程");
 
     // 默认检查间隔（1秒）
     let default_interval = Duration::from_secs(1);
 
-    thread::spawn(move || {
+    // 创建线程并保存句柄
+    let handle = thread::spawn(move || {
         loop {
             if !enabled.load(Ordering::SeqCst) {
                 log::info!("增量更新已禁用，停止后台监控");
@@ -599,22 +608,61 @@ fn start_background_monitor() {
             };
 
             // 锁已释放，现在可以安全地 sleep
-            thread::sleep(current_interval);
+            log::debug!("测试xxxxxxxxxxxxxxxx:{:?}", current_interval);
+
+            // 原来：
+            // thread::sleep(current_interval);  // 可能 1 小时
+
+            // 改为：
+            let mut remaining = current_interval;
+            while remaining > Duration::ZERO {
+                let sleep_time = std::cmp::min(remaining, Duration::from_millis(1000));
+                thread::sleep(sleep_time);
+                remaining -= sleep_time;
+
+                // 定期检查停止标志
+                if !enabled.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+
         }
 
+        // 线程退出时清除句柄
         unsafe {
-            BACKGROUND_MONITOR_RUNNING = false;
+            BACKGROUND_MONITOR_HANDLE = None;
         }
         log::info!("后台 USN 监控线程已停止");
     });
+
+    // 保存线程句柄
+    unsafe {
+        BACKGROUND_MONITOR_HANDLE = Some(handle);
+    }
 }
 
 /// 停止增量更新服务
 pub fn stop_incremental_service() {
     log::info!("停止增量更新服务");
 
+    // 1. 首先设置 enabled 为 false，通知后台线程停止
     if let Ok(updater) = INCREMENTAL_UPDATER.write() {
         updater.enabled.store(false, Ordering::SeqCst);
+    }
+
+    // 2. 获取线程句柄并清除（以便重新启动）
+    // 注意：这里使用 Option 的 take 方法来获取句柄的所有权
+    let handle = unsafe {
+        std::mem::take(&mut BACKGROUND_MONITOR_HANDLE)
+    };
+
+    // 3. 等待线程退出
+    if let Some(handle) = handle {
+        log::debug!("等待后台监控线程退出...");
+        // 使用 join 等待线程退出（会阻塞当前线程）
+        // 这是可以接受的，因为 stop_incremental_service 是在重建索引前调用的
+        let _ = handle.join();
+        log::info!("后台监控线程已成功停止");
     }
 
     // 注意：USN 状态会在后台线程检测到停止信号后自动保存
@@ -684,9 +732,9 @@ pub fn set_last_usn(volume: &str, usn: i64) -> Result<(), String> {
     cache_manager.set_usn(volume, usn);
 
     // 同步更新到增量更新器
-    if let Ok(mut updater) = INCREMENTAL_UPDATER.write() {
-        updater.set_last_usn(volume, usn);
-    }
+    // if let Ok(mut updater) = INCREMENTAL_UPDATER.write() {
+    //     updater.set_last_usn(volume, usn);
+    // }
 
     Ok(())
 }
