@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "wsearch",
-  "version": "0.1.4",
   "identifier": "com.wangwj14.wsearch",
   "build": {
     "beforeDevCommand": "pnpm dev",
