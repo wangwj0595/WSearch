@@ -21,7 +21,7 @@ const CACHE_VERSION: u32 = 3;
 
 /// 索引条目（用于二进制序列化）
 #[derive(Debug, Clone)]
-struct IndexEntry {
+pub struct IndexEntry {
     name: String,
     path: String,
     size: u64,
@@ -48,6 +48,7 @@ pub struct IndexCache {
 }
 
 /// 卷索引
+#[allow(dead_code)]
 struct VolumeIndex {
     entries: Vec<usize>,  // 条目在主列表中的索引
     root_path: String,
@@ -105,6 +106,7 @@ impl IndexCache {
 
         cache.last_update = std::time::Instant::now();
         cache.is_valid.store(true, Ordering::SeqCst);
+        cache.version = CACHE_VERSION;
         log::info!("索引缓存构建完成，共 {} 个文件", cache.entries.len());
 
         cache
@@ -221,11 +223,13 @@ impl IndexCache {
     }
 
     /// 获取最后更新时间
+    #[allow(dead_code)]
     pub fn last_update_time(&self) -> std::time::Instant {
         self.last_update
     }
 
     /// 获取指定卷的条目
+    #[allow(dead_code)]
     pub fn get_volume_entries(&self, volume_root: &str) -> Vec<&IndexEntry> {
         if let Some(volume_idx) = self.volume_indices.get(volume_root) {
             volume_idx.entries
@@ -238,6 +242,7 @@ impl IndexCache {
     }
 
     /// 从路径提取卷根路径（内部方法）
+    #[allow(dead_code)]
     fn extract_volume(path: &str) -> String {
         let normalized = path.trim_start_matches("\\\\.\\");
 
@@ -378,7 +383,7 @@ impl CacheManager {
         }
 
         let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        let count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        // let count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
 
         // 根据版本选择解析方式
         match version {
@@ -781,6 +786,7 @@ impl CacheManager {
     }
 
     /// 检查是否正在构建索引
+    #[allow(dead_code)]
     pub fn is_building(&self) -> bool {
         self.is_building.load(Ordering::SeqCst)
     }
@@ -827,6 +833,7 @@ impl CacheManager {
     }
 
     /// 清除缓存
+    #[allow(dead_code)]
     pub fn clear(&self) {
         let mut index = self.index.write();
         *index = IndexCache::new();
@@ -986,6 +993,7 @@ impl CacheManager {
     }
 
     /// 获取所有 USN 状态的副本（用于外部访问）
+    #[allow(dead_code)]
     pub fn get_all_usn_states(&self) -> HashMap<String, i64> {
         let index = self.index.read();
         index.usn_states.clone()

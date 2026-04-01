@@ -1,21 +1,21 @@
-use crate::models::{SearchConfig, SearchResult};
+use crate::models::{SearchConfig, SearchResult, SearchProgress};
 use crate::services::mft_reader;
-use crate::services::index_cache::{self, get_cache_manager, SearchResultEntry as CacheSearchResult};
+use crate::services::index_cache::{get_cache_manager};
 use crate::services::usn_monitor;
 use crate::services::is_running_as_admin;
 use rayon::prelude::*;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender, Receiver};
-use std::sync::Mutex;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 use walkdir::WalkDir;
-use aho_corasick::AhoCorasick;
+// use aho_corasick::AhoCorasick;
 
 // MFT 条目结构（用于内存索引）
 #[derive(Clone)]
+#[allow(dead_code)]
 struct MftEntry {
     name: String,
     path: String,
@@ -25,75 +25,66 @@ struct MftEntry {
 }
 
 // 高效搜索器（使用 Aho-Corasick 多模式匹配）
-struct FastSearcher {
-    matcher: Option<AhoCorasick>,
-    keywords: Vec<String>,
-}
+// struct FastSearcher {
+//     matcher: Option<AhoCorasick>,
+//     keywords: Vec<String>,
+// }
 
-impl FastSearcher {
-    fn new(query: &str, case_sensitive: bool) -> Self {
-        let keywords: Vec<String> = query
-            .split_whitespace()
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                if case_sensitive {
-                    s.to_string()
-                } else {
-                    s.to_lowercase()
-                }
-            })
-            .collect();
+// impl FastSearcher {
+//     fn new(query: &str, case_sensitive: bool) -> Self {
+//         let keywords: Vec<String> = query
+//             .split_whitespace()
+//             .filter(|s| !s.is_empty())
+//             .map(|s| {
+//                 if case_sensitive {
+//                     s.to_string()
+//                 } else {
+//                     s.to_lowercase()
+//                 }
+//             })
+//             .collect();
 
-        if keywords.is_empty() {
-            return Self {
-                matcher: None,
-                keywords: Vec::new(),
-            };
-        }
+//         if keywords.is_empty() {
+//             return Self {
+//                 matcher: None,
+//                 keywords: Vec::new(),
+//             };
+//         }
 
-        // 构建 Aho-Corasick 自动机
-        let patterns: Vec<&str> = keywords.iter().map(|s| s.as_str()).collect();
-        let matcher = AhoCorasick::new(&patterns).ok();
+//         // 构建 Aho-Corasick 自动机
+//         let patterns: Vec<&str> = keywords.iter().map(|s| s.as_str()).collect();
+//         let matcher = AhoCorasick::new(&patterns).ok();
 
-        Self { matcher, keywords }
-    }
+//         Self { matcher, keywords }
+//     }
 
-    fn is_match(&self, text: &str) -> bool {
-        if self.keywords.is_empty() {
-            return false;
-        }
+//     fn is_match(&self, text: &str) -> bool {
+//         if self.keywords.is_empty() {
+//             return false;
+//         }
 
-        let text = text;  // 使用引用避免复制
+//         let text = text;  // 使用引用避免复制
 
-        if let Some(ref matcher) = self.matcher {
-            // 使用 Aho-Corasick 进行多模式匹配
-            let mut found_count = 0;
-            for _ in matcher.find_iter(text) {
-                found_count += 1;
-                if found_count == self.keywords.len() {
-                    return true;
-                }
-            }
-            false
-        } else {
-            // 回退到普通匹配
-            self.keywords.iter().all(|k| text.contains(k))
-        }
-    }
-}
-
-/// 搜索进度信息
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SearchProgress {
-    pub scanned_count: u64,
-    pub found_count: u64,
-    pub current_path: String,
-    pub elapsed_time: u64,
-    pub estimated_remaining: u64,
-}
+//         if let Some(ref matcher) = self.matcher {
+//             // 使用 Aho-Corasick 进行多模式匹配
+//             let mut found_count = 0;
+//             for _ in matcher.find_iter(text) {
+//                 found_count += 1;
+//                 if found_count == self.keywords.len() {
+//                     return true;
+//                 }
+//             }
+//             false
+//         } else {
+//             // 回退到普通匹配
+//             self.keywords.iter().all(|k| text.contains(k))
+//         }
+//     }
+// }
 
 /// 搜索结果项（包含额外信息用于流式发送）
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SearchResultItem {
     pub result: SearchResult,
     pub scanned_count: u64,
@@ -101,6 +92,7 @@ pub struct SearchResultItem {
 
 /// 文件扫描器
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct FileScanner {
     config: SearchConfig,
     start_time: Option<Instant>,
@@ -115,6 +107,7 @@ impl FileScanner {
     }
 
     /// 克隆方法
+    #[allow(dead_code)]
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
@@ -225,10 +218,11 @@ impl FileScanner {
                     let remaining = if rate > 0 { (scanned / rate).saturating_sub(elapsed) } else { 0 };
 
                     let progress = SearchProgress {
-                        scanned_count: scanned,
-                        found_count: found_count.load(Ordering::SeqCst),
+                        scanned_files: scanned,
+                        found_results: found_count.load(Ordering::SeqCst),
+                        is_complete: false,
                         current_path: entry.path().to_string_lossy().to_string(),
-                        elapsed_time: elapsed,
+                        elapsed_time: elapsed * 1000, // 转换为毫秒
                         estimated_remaining: remaining,
                     };
                     let _ = progress_tx.send(progress);
@@ -343,10 +337,11 @@ impl FileScanner {
         // 发送最终进度
         let elapsed = start_time.elapsed().as_secs();
         let progress = SearchProgress {
-            scanned_count: scanned_count.load(Ordering::SeqCst),
-            found_count: found_count.load(Ordering::SeqCst),
+            scanned_files: scanned_count.load(Ordering::SeqCst),
+            found_results: found_count.load(Ordering::SeqCst),
+            is_complete: true,
             current_path: String::new(),
-            elapsed_time: elapsed,
+            elapsed_time: elapsed * 1000, // 转换为毫秒
             estimated_remaining: 0,
         };
         let _ = progress_tx.send(progress);
@@ -383,8 +378,9 @@ impl FileScanner {
 
             // 发送初始进度
             let _ = progress_tx.send(SearchProgress {
-                scanned_count: 0,
-                found_count: 0,
+                scanned_files: 0,
+                found_results: 0,
+                is_complete: false,
                 current_path: "正在为新卷建立索引...".to_string(),
                 elapsed_time: 0,
                 estimated_remaining: 0,
@@ -397,7 +393,7 @@ impl FileScanner {
         // 检查缓存是否有效
         if cache_manager.is_valid() {
             // 启动增量更新服务（如果尚未启动）
-            // Self::start_incremental_service_if_needed(&config.search_paths);
+            Self::start_incremental_service_if_needed(&config.search_paths);
 
             // 检查是否有新记录
             if usn_monitor::has_new_records() {
@@ -409,8 +405,9 @@ impl FileScanner {
 
                 // 发送初始进度
                 let _ = progress_tx.send(SearchProgress {
-                    scanned_count: 0,
-                    found_count: 0,
+                    scanned_files: 0,
+                    found_results: 0,
+                    is_complete: false,
                     current_path: "正在同步文件变化...".to_string(),
                     elapsed_time: 0,
                     estimated_remaining: 0,
@@ -424,8 +421,9 @@ impl FileScanner {
 
             // 发送搜索进度
             let _ = progress_tx.send(SearchProgress {
-                scanned_count: 0,
-                found_count: 0,
+                scanned_files: 0,
+                found_results: 0,
+                is_complete: false,
                 current_path: "正在从缓存搜索...".to_string(),
                 elapsed_time: 0,
                 estimated_remaining: 0,
@@ -490,8 +488,9 @@ impl FileScanner {
             // 发送最终进度
             let elapsed = start_time.elapsed().as_millis() as u64;
             let progress = SearchProgress {
-                scanned_count: cache_manager.file_count(),
-                found_count: found_count.load(Ordering::SeqCst),
+                scanned_files: cache_manager.file_count(),
+                found_results: found_count.load(Ordering::SeqCst),
+                is_complete: true,
                 current_path: String::new(),
                 elapsed_time: elapsed,
                 estimated_remaining: 0,
@@ -757,6 +756,7 @@ impl FileScanner {
 
     /// 获取路径的卷根路径
     #[cfg(windows)]
+    #[allow(dead_code)]
     fn get_volume_root(path: &str) -> String {
         let p = Path::new(path);
         if let Some(root) = p.components().next() {
@@ -805,6 +805,7 @@ impl FileScanner {
     }
 
     /// 获取搜索花费的时间
+    #[allow(dead_code)]
     pub fn get_elapsed_time(&self) -> u64 {
         self.start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0)
     }

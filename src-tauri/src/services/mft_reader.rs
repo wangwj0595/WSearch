@@ -4,7 +4,6 @@
 /// 检查是否有管理员权限
 #[cfg(windows)]
 pub fn is_running_as_admin() -> bool {
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};

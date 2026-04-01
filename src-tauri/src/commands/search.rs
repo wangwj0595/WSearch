@@ -1,7 +1,7 @@
 use crate::models::{SearchConfig, SearchResult};
 use crate::services::config_store::ConfigStore;
 use crate::services::file_scanner::FileScanner;
-use crate::services::trigger_incremental_update;
+// use crate::services::trigger_incremental_update;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;

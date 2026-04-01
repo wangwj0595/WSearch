@@ -1237,10 +1237,10 @@ function AppContent() {
         )}
 
         <div className="results-container" ref={containerRef}>
-          {loading && searchProgress && searchProgress.scanned_count > 0 && (
+          {loading && searchProgress && searchProgress.scanned_files > 0 && (
             <div className="results-header" style={{ padding: '8px 16px', borderBottom: '1px solid #f0f0f0' }}>
               <Progress
-                percent={Math.min(99, Math.floor((searchProgress.scanned_count / Math.max(1, searchProgress.scanned_count + searchProgress.estimated_remaining * 100)) * 100))}
+                percent={Math.min(99, Math.floor((searchProgress.scanned_files / Math.max(1, searchProgress.scanned_files + searchProgress.estimated_remaining * 100)) * 100))}
                 size="small"
                 showInfo={false}
                 status="active"

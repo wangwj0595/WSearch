@@ -2,12 +2,13 @@
 //! 使用 usn-journal-rs 监控文件变化，实现增量更新
 
 use crate::services::index_cache::get_cache_manager;
-use std::collections::HashMap;
+// use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
+// use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 use usn_journal_rs::journal::EnumOptions;
@@ -187,12 +188,12 @@ impl IncrementalUpdater {
     }
 
     /// 持久化缓存和 USN 状态（统一保存到索引缓存）
-    fn persist_all(&self) {
-        // 保存索引缓存（包含 USN 状态）
-        let cache_manager = get_cache_manager();
-        cache_manager.flush();
-        log::info!("缓存和 USN 状态已持久化（统一到索引缓存）");
-    }
+    // fn persist_all(&self) {
+    //     // 保存索引缓存（包含 USN 状态）
+    //     let cache_manager = get_cache_manager();
+    //     cache_manager.flush();
+    //     log::info!("缓存和 USN 状态已持久化（统一到索引缓存）");
+    // }
 
     /// 初始化（指定要监控的卷）
     pub fn init(&mut self, volume: &str) -> Result<UsnJournalStatus, String> {
@@ -221,9 +222,9 @@ impl IncrementalUpdater {
     }
 
     /// 获取状态
-    pub fn get_status(&self) -> Option<UsnJournalStatus> {
-        self.monitor.as_ref().map(|m| m.get_status())
-    }
+    // pub fn get_status(&self) -> Option<UsnJournalStatus> {
+    //     self.monitor.as_ref().map(|m| m.get_status())
+    // }
 
     /// 检查是否启用
     pub fn is_enabled(&self) -> bool {
@@ -242,12 +243,12 @@ impl IncrementalUpdater {
 
     /// 手动设置指定卷的 USN 位置
     /// 用于跳过历史记录或重新扫描
-    pub fn set_last_usn(&mut self, volume: &str, usn: i64) {
-        log::info!("手动设置卷 {} 的 USN 位置为: {}", volume, usn);
-        // 存储到 CacheManager（统一管理）
-        let cache_manager = get_cache_manager();
-        cache_manager.set_usn(volume, usn);
-    }
+    // pub fn set_last_usn(&mut self, volume: &str, usn: i64) {
+    //     log::info!("手动设置卷 {} 的 USN 位置为: {}", volume, usn);
+    //     // 存储到 CacheManager（统一管理）
+    //     let cache_manager = get_cache_manager();
+    //     cache_manager.set_usn(volume, usn);
+    // }
 
     /// 获取指定卷的当前 USN 位置（从 CacheManager 获取）
     pub fn get_last_usn(&self, volume: &str) -> Option<i64> {
@@ -480,14 +481,18 @@ lazy_static::lazy_static! {
         std::sync::RwLock::new(IncrementalUpdater::new());
 }
 
-/// 后台监控线程句柄（使用 Option 以便在停止时获取）
-static mut BACKGROUND_MONITOR_HANDLE: Option<std::thread::JoinHandle<()>> = None;
+
+lazy_static::lazy_static! {
+    /// 后台监控线程句柄（使用 Mutex 包装以确保线程安全）
+    static ref BACKGROUND_MONITOR_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> =
+        Mutex::new(None);
+}
 
 /// 检查增量更新服务是否已经在运行
 pub fn is_incremental_service_running() -> bool {
     // 检查后台线程是否在运行（通过 JoinHandle 是否存在）
-    unsafe {
-        if BACKGROUND_MONITOR_HANDLE.is_some() {
+    if let Ok(handle) = BACKGROUND_MONITOR_HANDLE.lock() {
+        if handle.is_some() {
             return true;
         }
     }
@@ -544,11 +549,14 @@ pub fn start_incremental_service(volumes: Vec<String>) -> Result<Vec<UsnJournalS
 /// 启动后台监控线程
 fn start_background_monitor() {
     // 如果已经有后台线程在运行，不再启动
-    unsafe {
-        if BACKGROUND_MONITOR_HANDLE.is_some() {
+    if let Ok(existing_handle) = BACKGROUND_MONITOR_HANDLE.lock() {
+        if existing_handle.is_some() {
             log::debug!("后台监控线程已在运行");
             return;
         }
+    } else {
+        log::error!("获取后台监控线程句柄锁失败");
+        return;
     }
 
     // 获取 updater 的引用
@@ -629,15 +637,15 @@ fn start_background_monitor() {
         }
 
         // 线程退出时清除句柄
-        unsafe {
-            BACKGROUND_MONITOR_HANDLE = None;
+        if let Ok(mut bg_handle) = BACKGROUND_MONITOR_HANDLE.lock() {
+            *bg_handle = None;
         }
         log::info!("后台 USN 监控线程已停止");
     });
 
     // 保存线程句柄
-    unsafe {
-        BACKGROUND_MONITOR_HANDLE = Some(handle);
+    if let Ok(mut bg_handle) = BACKGROUND_MONITOR_HANDLE.lock() {
+        *bg_handle = Some(handle);
     }
 }
 
@@ -651,10 +659,9 @@ pub fn stop_incremental_service() {
     }
 
     // 2. 获取线程句柄并清除（以便重新启动）
-    // 注意：这里使用 Option 的 take 方法来获取句柄的所有权
-    let handle = unsafe {
-        std::mem::take(&mut BACKGROUND_MONITOR_HANDLE)
-    };
+    // 使用 Mutex 的 take 方法来获取句柄的所有权
+    let handle = BACKGROUND_MONITOR_HANDLE.lock().ok()
+        .and_then(|mut h| h.take());
 
     // 3. 等待线程退出
     if let Some(handle) = handle {
@@ -670,9 +677,9 @@ pub fn stop_incremental_service() {
 }
 
 /// 获取增量更新器
-pub fn get_incremental_updater() -> &'static std::sync::RwLock<IncrementalUpdater> {
-    &INCREMENTAL_UPDATER
-}
+// pub fn get_incremental_updater() -> &'static std::sync::RwLock<IncrementalUpdater> {
+//     &INCREMENTAL_UPDATER
+// }
 
 /// 检查是否有新记录（基于最近的增量更新）
 /// 返回 true 表示有新增的文件变化未被搜索到
@@ -740,10 +747,10 @@ pub fn set_last_usn(volume: &str, usn: i64) -> Result<(), String> {
 }
 
 /// 获取指定卷的当前 USN 位置（从 CacheManager 获取）
-pub fn get_last_usn(volume: &str) -> Option<i64> {
-    let cache_manager = get_cache_manager();
-    cache_manager.get_usn(volume)
-}
+// pub fn get_last_usn(volume: &str) -> Option<i64> {
+//     let cache_manager = get_cache_manager();
+//     cache_manager.get_usn(volume)
+// }
 
 /// 检查是否是临时文件
 fn is_temp_file(file_name: &str) -> bool {
@@ -807,31 +814,6 @@ fn get_file_attributes(path: &str) -> (u64, bool, i64) {
             (0, false, 0)
         }
     }
-}
-
-// ==================== 持久化保存功能 ====================
-
-/// 保存 USN 状态（已废弃，请使用 CacheManager.flush()）
-/// 保留此函数用于向后兼容，但不再使用单独的 JSON 文件
-#[deprecated(note = "USN 状态已统一存储到索引缓存中，请使用 get_cache_manager().flush()")]
-pub fn save_usn_state() -> Result<(), String> {
-    log::info!("保存 USN 状态（已统一到索引缓存）");
-    let cache_manager = get_cache_manager();
-    cache_manager.flush();
-    Ok(())
-}
-
-/// 加载 USN 状态（已废弃，USN 状态在加载缓存时自动恢复）
-#[deprecated(note = "USN 状态在加载缓存时自动恢复")]
-pub fn load_usn_state() -> Result<HashMap<String, i64>, String> {
-    let cache_manager = get_cache_manager();
-    Ok(cache_manager.get_all_usn_states())
-}
-
-/// 初始化 USN 状态（已废弃，USN 状态在加载缓存时自动恢复）
-#[deprecated(note = "USN 状态在加载缓存时自动恢复")]
-pub fn init_usn_state() {
-    log::info!("USN 状态在加载缓存时自动恢复");
 }
 
 // ==================== 调试功能：获取最近 USN 记录 ====================
@@ -975,35 +957,35 @@ pub fn get_recent_usn_records(volume: &str, count: usize) -> Result<Vec<UsnRecor
     match journal.iter_with_options(options) {
         Ok(iter) => {
             for result in iter {
-            //     match result {
-            //         Ok(entry) => {
-            //             // let file_name_str = entry.file_name.to_string_lossy().to_string();
+                match result {
+                    Ok(entry) => {
+                        let file_name_str = entry.file_name.to_string_lossy().to_string();
 
-            //             // 解析完整路径
-            //             // let full_path = resolver.resolve_path(&entry);
-            //             // let path_str = match &full_path {
-            //             //     Some(p) => p.to_string_lossy().to_string(),
-            //             //     None => format!("{}:\\{}", drive_letter, file_name_str),
-            //             // };
+                        // 解析完整路径
+                        let full_path = resolver.resolve_path(&entry);
+                        let path_str = match &full_path {
+                            Some(p) => p.to_string_lossy().to_string(),
+                            None => format!("{}:\\{}", drive_letter, file_name_str),
+                        };
 
-            //             // 转换时间戳
-            //             // let timestamp = chrono::DateTime::<chrono::Local>::from(entry.time)
-            //             //     .format("%Y-%m-%d %H:%M:%S%.3f")
-            //             //     .to_string();
+                        // 转换时间戳
+                        let timestamp = chrono::DateTime::<chrono::Local>::from(entry.time)
+                            .format("%Y-%m-%d %H:%M:%S%.3f")
+                            .to_string();
 
-            //             // records.push(UsnRecord {
-            //             //     usn: entry.usn,
-            //             //     file_name: file_name_str,
-            //             //     full_path: path_str,
-            //             //     reason: entry.reason,
-            //             //     reason_text: reason_to_string(entry.reason),
-            //             //     timestamp,
-            //             // });
-            //         }
-            //         Err(e) => {
-            //             log::warn!("读取 USN 条目失败: {:?}", e);
-            //         }
-            //     }
+                        records.push(UsnRecord {
+                            usn: entry.usn,
+                            file_name: file_name_str,
+                            full_path: path_str,
+                            reason: entry.reason,
+                            reason_text: reason_to_string(entry.reason),
+                            timestamp,
+                        });
+                    }
+                    Err(e) => {
+                        log::warn!("读取 USN 条目失败: {:?}", e);
+                    }
+                }
             }
         }
         Err(e) => {

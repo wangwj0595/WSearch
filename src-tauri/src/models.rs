@@ -70,10 +70,12 @@ impl Default for SearchConfig {
 /// 搜索进度
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchProgress {
-    pub scanned_files: u64,
-    pub found_results: u64,
-    pub is_complete: bool,
-    pub current_path: String,
+    pub scanned_files: u64,         // 已扫描文件数
+    pub found_results: u64,         // 已找到结果数
+    pub is_complete: bool,          // 搜索是否完成
+    pub current_path: String,       // 当前扫描路径
+    pub elapsed_time: u64,          // 已耗时（毫秒）
+    pub estimated_remaining: u64,   // 预估剩余时间（秒）
 }
 
 impl Default for SearchProgress {
@@ -83,6 +85,8 @@ impl Default for SearchProgress {
             found_results: 0,
             is_complete: false,
             current_path: String::new(),
+            elapsed_time: 0,
+            estimated_remaining: 0,
         }
     }
 }

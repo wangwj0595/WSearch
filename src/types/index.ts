@@ -44,8 +44,9 @@ export interface SearchHistory {
 
 // 搜索进度
 export interface SearchProgress {
-  scanned_count: number;
-  found_count: number;
+  scanned_files: number;
+  found_results: number;
+  is_complete: boolean;
   current_path: string;
   elapsed_time: number;
   estimated_remaining: number;
