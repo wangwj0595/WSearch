@@ -4,7 +4,7 @@ mod services;
 
 use commands::{
     cancel_search, clear_search_history, copy_path, delete_file, delete_files, get_current_results, get_recent_usn,
-    get_search_config, get_search_history, get_window_config, open_file, refresh_index, rename_file, reveal_in_explorer, save_search_config,
+    get_search_config, get_search_history, get_window_config, is_admin, open_file, refresh_index, rename_file, reveal_in_explorer, save_search_config,
     save_window_config, search_files, SearchState,
 };
 use services::{init_cache, start_incremental_service, ConfigStore};
@@ -129,6 +129,7 @@ pub fn run() {
             get_window_config,
             get_recent_usn,
             refresh_index,
+            is_admin,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

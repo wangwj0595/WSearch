@@ -56,6 +56,9 @@ function AppContent() {
   const [presetName, setPresetName] = useState('');
   const [editingPreset, setEditingPreset] = useState<SearchPreset | null>(null);
 
+  // 管理员权限状态
+  const [isAdmin, setIsAdmin] = useState(false);
+
   // 文件名编辑相关状态
   const [editingFilePath, setEditingFilePath] = useState<string | null>(null);
   const [editingFileName, setEditingFileName] = useState<string>("");
@@ -102,6 +105,22 @@ function AppContent() {
   useEffect(() => {
     loadConfig();
     loadHistory();
+
+    // 检查管理员权限
+    invoke<boolean>("is_admin").then((isAdmin) => {
+      setIsAdmin(isAdmin);
+      if (!isAdmin) {
+        // 如果不是管理员，关闭 MFT 选项
+        setConfig(prev => {
+          if (prev.use_mft) {
+            const newConfig = { ...prev, use_mft: false };
+            invoke("save_search_config", { config: newConfig });
+            return newConfig;
+          }
+          return prev;
+        });
+      }
+    }).catch(console.error);
 
     // 监听搜索结果批次事件（流式显示）
     const unlistenBatch = listen<SearchResult[]>("search_result_batch", (event) => {
@@ -979,16 +998,19 @@ function AppContent() {
               >
                 区分大小写
               </Checkbox>
-              <Checkbox
-                checked={config.use_mft}
-                onChange={(e) => {
-                  const newConfig = { ...config, use_mft: e.target.checked };
-                  setConfig(newConfig);
-                  invoke("save_search_config", { config: newConfig });
-                }}
-              >
-                MFT 快速搜索
-              </Checkbox>
+              <Tooltip title={!isAdmin ? "MFT 快速搜索需要管理员权限运行" : ""}>
+                <Checkbox
+                  checked={config.use_mft}
+                  disabled={!isAdmin}
+                  onChange={(e) => {
+                    const newConfig = { ...config, use_mft: e.target.checked };
+                    setConfig(newConfig);
+                    invoke("save_search_config", { config: newConfig });
+                  }}
+                >
+                  MFT 快速搜索 {!isAdmin && <Text type="secondary" style={{ fontSize: 11 }}>(需管理员)</Text>}
+                </Checkbox>
+              </Tooltip>
               <div className="max-results-wrapper">
                 <Text style={{ fontSize: 13 }}>最大结果数:</Text>
                 <InputNumber
