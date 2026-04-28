@@ -3,7 +3,7 @@ mod models;
 mod services;
 
 use commands::{
-    cancel_search, clear_search_history, copy_path, delete_file, delete_files, get_current_results, get_recent_usn,
+    cancel_search, clear_cache, clear_search_history, copy_path, delete_file, delete_files, get_current_results, get_recent_usn,
     get_search_config, get_search_history, get_window_config, is_admin, open_file, refresh_index, rename_file, reveal_in_explorer, save_search_config,
     save_window_config, search_files, SearchState,
 };
@@ -119,6 +119,7 @@ pub fn run() {
             get_search_history,
             clear_search_history,
             cancel_search,
+            clear_cache,
             open_file,
             reveal_in_explorer,
             copy_path,

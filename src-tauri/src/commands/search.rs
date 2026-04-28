@@ -198,6 +198,22 @@ pub fn cancel_search(search_state: State<'_, SearchState>) -> Result<(), String>
     Ok(())
 }
 
+/// 清理缓存并停止增量更新服务
+#[tauri::command]
+pub async fn clear_cache() -> Result<String, String> {
+    use crate::services::index_cache::get_cache_manager;
+    use crate::services::usn_monitor;
+
+    // 停止增量更新服务
+    usn_monitor::stop_incremental_service();
+    
+    // 清理缓存（内部会删除缓存文件）
+    let cache_manager = get_cache_manager();
+    cache_manager.clear();
+
+    Ok("缓存已清理，增量更新服务已停止".to_string())
+}
+
 /// 更新索引（强制重建指定卷的索引）- 接受卷列表，后端循环处理
 #[tauri::command]
 pub async fn refresh_index(volumes: Vec<String>) -> Result<String, String> {

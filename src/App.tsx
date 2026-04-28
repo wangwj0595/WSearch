@@ -43,6 +43,7 @@ function AppContent() {
 
   // 索引刷新相关状态
   const [refreshLoading, setRefreshLoading] = useState(false);
+  const [clearCacheLoading, setClearCacheLoading] = useState(false);
 
   // 文件大小筛选状态
   const [minSizeValue, setMinSizeValue] = useState<number | null>(null);
@@ -567,6 +568,19 @@ function AppContent() {
       message.error(`更新索引失败: ${e}`);
     } finally {
       setRefreshLoading(false);
+    }
+  };
+
+  // 清除缓存
+  const handleClearCache = async () => {
+    setClearCacheLoading(true);
+    try {
+      const result = await invoke<string>("clear_cache");
+      message.success(result);
+    } catch (e) {
+      message.error(`清理缓存失败: ${e}`);
+    } finally {
+      setClearCacheLoading(false);
     }
   };
 
@@ -1186,7 +1200,14 @@ function AppContent() {
                   icon: <SyncOutlined spin={refreshLoading} />,
                   label: '更新索引',
                   onClick: handleRefreshIndex,
-                  disabled: refreshLoading,
+                  disabled: refreshLoading || clearCacheLoading,
+                },
+                {
+                  key: 'clearCache',
+                  icon: <DeleteOutlined spin={clearCacheLoading} />,
+                  label: '清理缓存',
+                  onClick: handleClearCache,
+                  disabled: refreshLoading || clearCacheLoading,
                 },
                 {
                   key: 'debug',

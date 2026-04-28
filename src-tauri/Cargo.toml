@@ -1,6 +1,6 @@
 [package]
 name = "wsearch"
-version = "0.1.5"
+version = "0.1.6"
 description = "A Tauri App"
 authors = ["wangwj0595"]
 edition = "2021"
